@@ -1,0 +1,30 @@
+#include <winver.h>
+#include "version.h"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     KC_VER_MAJOR,KC_VER_MINOR,KC_VER_PATCH,0
+PRODUCTVERSION  KC_VER_MAJOR,KC_VER_MINOR,KC_VER_PATCH,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "mammadow"
+            VALUE "FileDescription",  KC_FILE_DESC
+            VALUE "FileVersion",      KC_FILE_VER_STR
+            VALUE "InternalName",     KC_INTERNAL_NAME
+            VALUE "OriginalFilename", KC_ORIG_FILENAME
+            VALUE "ProductName",      "Keychron Battery Tray"
+            VALUE "ProductVersion",   KC_VER_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

@@ -1,0 +1,12 @@
+* text=auto eol=lf
+
+*.c   text diff=c
+*.h   text diff=c
+*.rc  text
+*.manifest text
+
+*.exe binary
+*.zip binary
+
+# Keep archived Python reference scripts out of GitHub's language bar
+legacy/** linguist-vendored

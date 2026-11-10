@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(keychron_battery LANGUAGES C)
+project(keychron_battery VERSION 1.0.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -18,6 +18,13 @@ add_compile_definitions(
     WINVER=0x0A00
     NTDDI_VERSION=0x0A000000
 )
+
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/assets/version.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/version.h
+    @ONLY
+)
+include_directories(${CMAKE_CURRENT_BINARY_DIR}/generated)
 
 set(KC_WARN_FLAGS -Wall -Wextra -Wpedantic -Werror)
 set(KC_OPT_FLAGS
@@ -48,7 +55,7 @@ target_link_libraries(keychron_win PUBLIC keychron_pure hid setupapi gdi32 user3
 
 add_executable(keychron-battery-tray WIN32
     src/tray_main.c
-    assets/app.rc
+    assets/tray.rc
 )
 target_compile_options(keychron-battery-tray PRIVATE ${KC_WARN_FLAGS} ${KC_OPT_FLAGS})
 target_link_options(keychron-battery-tray PRIVATE -municode -mwindows ${KC_LINK_OPT_FLAGS})
@@ -56,6 +63,7 @@ target_link_libraries(keychron-battery-tray PRIVATE keychron_win shell32 user32 
 
 add_executable(keychron-battery
     src/cli_main.c
+    assets/cli.rc
 )
 target_compile_options(keychron-battery PRIVATE ${KC_WARN_FLAGS} ${KC_OPT_FLAGS})
 target_link_options(keychron-battery PRIVATE -municode ${KC_LINK_OPT_FLAGS})

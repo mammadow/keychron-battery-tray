@@ -1,5 +1,8 @@
 # Keychron Battery Tray
 
+[![Windows CI](https://github.com/mammadow/keychron-battery-tray/actions/workflows/ci.yml/badge.svg)](https://github.com/mammadow/keychron-battery-tray/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/mammadow/keychron-battery-tray)](https://github.com/mammadow/keychron-battery-tray/releases)
+
 Native Windows system tray battery indicator and CLI diagnostic utility for Keychron wireless mice using the vendor HID protocol (confirmed with the Keychron Ultra-Link 8K receiver, VID `0x3434`, PID `0xD028`, USB interface `4`, Usage Page `0xFFC1`).
 
 Written in C17 against the Win32 and Windows HID SDKs (`hid.dll`, `setupapi.dll`, `shell32.dll`, `gdi32.dll`, `advapi32.dll`) for zero external runtime dependencies, ~1.7 MB private memory footprint, and zero idle polling wakeups.
@@ -22,6 +25,10 @@ Written in C17 against the Win32 and Windows HID SDKs (`hid.dll`, `setupapi.dll`
 | `tests/` | CTest suites (`test_core.c`, `test_win.c`) |
 | `.github/workflows/` | Windows MinGW-W64 CMake/CTest CI workflow |
 | `legacy/` | Original Python scripts (`keychron_battery.py`, `keychron_battery_tray_native.pyw`, `requirements.txt`) |
+
+## Download (Prebuilt)
+
+Grab the latest `keychron-battery-win64-v*.zip` from [GitHub Releases](https://github.com/mammadow/keychron-battery-tray/releases) (built automatically by CI with SHA-256 checksums), extract it, and run `keychron-battery-tray.exe`.
 
 ## Build & Test (CMake + MinGW-W64 / Ninja)
 

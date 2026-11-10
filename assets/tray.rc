@@ -1,0 +1,6 @@
+1 24 "app.manifest"
+
+#define KC_FILE_DESC     "Keychron Wireless Mouse Battery Tray"
+#define KC_INTERNAL_NAME "keychron-battery-tray"
+#define KC_ORIG_FILENAME "keychron-battery-tray.exe"
+#include "version_info.rc"

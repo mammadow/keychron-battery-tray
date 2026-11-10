@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Configure
+        shell: msys2 {0}
+        run: cmake --preset release
+
+      - name: Build
+        shell: msys2 {0}
+        run: cmake --build --preset release --parallel
+
+      - name: Test
+        shell: msys2 {0}
+        run: ctest --preset release --verbose
+
+      - name: Package release archive
+        shell: pwsh
+        run: |
+          $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "dev-${{ github.run_number }}" }
+          New-Item -ItemType Directory -Force -Path dist/stage | Out-Null
+          Copy-Item build/keychron-battery-tray.exe dist/stage/
+          Copy-Item build/keychron-battery.exe dist/stage/
+          Copy-Item README.md dist/stage/
+          $zip = "dist/keychron-battery-win64-$tag.zip"
+          Compress-Archive -Path dist/stage/* -DestinationPath $zip -Force
+          $sums = @(
+            "$( (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() )  $(Split-Path $zip -Leaf)"
+            "$( (Get-FileHash build/keychron-battery-tray.exe -Algorithm SHA256).Hash.ToLower() )  keychron-battery-tray.exe"
+            "$( (Get-FileHash build/keychron-battery.exe -Algorithm SHA256).Hash.ToLower() )  keychron-battery.exe"
+          )
+          $sums | Set-Content -Path dist/SHA256SUMS.txt -Encoding ASCII
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag `
+            "dist/keychron-battery-win64-$tag.zip" `
+            "dist/SHA256SUMS.txt" `
+            --title "Keychron Battery Tray $tag" `
+            --generate-notes

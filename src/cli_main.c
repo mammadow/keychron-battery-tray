@@ -1,5 +1,6 @@
 #include "hid_win.h"
 #include "protocol.h"
+#include "version.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -18,6 +19,7 @@ static void print_usage(void) {
             L"  --raw              Print bare percentage integer (e.g. 46)\n"
             L"  --json             Output structured JSON (works with query or --list)\n"
             L"  --debug            Print raw HID caps, send method, and response bytes\n"
+            L"  --version, -v      Print version and exit\n"
             L"  --help, -h         Show this help message\n");
 }
 
@@ -98,6 +100,9 @@ int wmain(int argc, wchar_t **argv) {
             raw_mode = true;
         } else if (wcscmp(arg, L"--json") == 0) {
             json_mode = true;
+        } else if (wcscmp(arg, L"--version") == 0 || wcscmp(arg, L"-v") == 0) {
+            printf("keychron-battery %s\n", KC_APP_VERSION);
+            return 0;
         } else if (wcscmp(arg, L"--help") == 0 || wcscmp(arg, L"-h") == 0) {
             print_usage();
             return 0;

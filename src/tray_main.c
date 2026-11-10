@@ -2,6 +2,7 @@
 #include "icon_render.h"
 #include "protocol.h"
 #include "settings_win.h"
+#include "version.h"
 
 #include <dbt.h>
 #include <hidsdi.h>
@@ -23,6 +24,10 @@
 #define IDM_REFRESH           1002U
 #define IDM_AUTOSTART         1003U
 #define IDM_QUIT              1004U
+#define IDM_VERSION           1005U
+
+#define KC_WIDE2(x)           L##x
+#define KC_WIDE(x)            KC_WIDE2(x)
 
 #define IDM_POLL_5            1101U
 #define IDM_POLL_15           1102U
@@ -377,6 +382,7 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
                 IDM_AUTOSTART,
                 L"Run at Windows startup");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_VERSION, L"Keychron Battery Tray v" KC_WIDE(KC_APP_VERSION));
     AppendMenuW(menu, MF_STRING, IDM_QUIT, L"Quit");
 
     POINT pt;

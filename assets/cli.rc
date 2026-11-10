@@ -1,0 +1,4 @@
+#define KC_FILE_DESC     "Keychron Wireless Mouse Battery CLI"
+#define KC_INTERNAL_NAME "keychron-battery"
+#define KC_ORIG_FILENAME "keychron-battery.exe"
+#include "version_info.rc"
