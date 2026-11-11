@@ -14,9 +14,15 @@
         }                                                                       \
     } while (0)
 
+typedef enum kc_fg_expect {
+    KC_FG_WHITE = 0,
+    KC_FG_DARK,
+    KC_FG_RED
+} kc_fg_expect_t;
+
 static void verify_hicon_layout(HICON hicon,
                                 int size,
-                                bool expect_dark_fg,
+                                kc_fg_expect_t fg,
                                 int expected_min_h,
                                 int expected_max_h) {
     KC_CHECK(hicon != NULL);
@@ -52,6 +58,7 @@ static void verify_hicon_layout(HICON hicon,
             uint32_t px = pixels[y * size + x];
             uint8_t a = (uint8_t)((px >> 24) & 0xFFU);
             uint8_t r = (uint8_t)((px >> 16) & 0xFFU);
+            uint8_t g = (uint8_t)((px >> 8) & 0xFFU);
             if (a == 0U) {
                 transparent_pixels++;
             } else {
@@ -60,8 +67,10 @@ static void verify_hicon_layout(HICON hicon,
                 if (x > max_x) max_x = x;
                 if (y < min_y) min_y = y;
                 if (y > max_y) max_y = y;
-                if (expect_dark_fg) {
+                if (fg == KC_FG_DARK) {
                     KC_CHECK(r <= 24U);
+                } else if (fg == KC_FG_RED) {
+                    KC_CHECK(r >= g);
                 } else {
                     KC_CHECK(r <= a);
                 }
@@ -89,31 +98,36 @@ int main(void) {
     kc_icon_cache_t cache;
     kc_icon_cache_init(&cache);
 
-    /* At 24px (150% DPI), two-digit label should match Windows 11 taskbar 13px cap height. */
-    HICON h46 = kc_icon_cache_get(&cache, "46", 24, false);
-    verify_hicon_layout(h46, 24, false, 13, 13);
+    HICON h46 = kc_icon_cache_get(&cache, "46", 24, false, false);
+    verify_hicon_layout(h46, 24, KC_FG_WHITE, 13, 13);
 
-    /* Cache hit returns identical handle without recreating HICON. */
-    HICON h46_again = kc_icon_cache_get(&cache, "46", 24, false);
+    HICON h46_again = kc_icon_cache_get(&cache, "46", 24, false, false);
     KC_CHECK(h46_again == h46);
 
-    /* 3-digit "100" scales cleanly inside both 16px and 24px bounds. */
-    HICON h100_24 = kc_icon_cache_get(&cache, "100", 24, false);
-    verify_hicon_layout(h100_24, 24, false, 11, 13);
+    /* Low-battery icon variant uses distinct HICON with red foreground. */
+    HICON h12_norm = kc_icon_cache_get(&cache, "12", 24, false, false);
+    HICON h12_low = kc_icon_cache_get(&cache, "12", 24, false, true);
+    KC_CHECK(h12_low != h12_norm);
+    verify_hicon_layout(h12_low, 24, KC_FG_RED, 13, 13);
 
-    HICON h100_16 = kc_icon_cache_get(&cache, "100", 16, false);
-    verify_hicon_layout(h100_16, 16, false, 7, 9);
+    HICON h100_24 = kc_icon_cache_get(&cache, "100", 24, false, false);
+    verify_hicon_layout(h100_24, 24, KC_FG_WHITE, 11, 13);
 
-    HICON hdash = kc_icon_cache_get(&cache, "--", 16, false);
-    verify_hicon_layout(hdash, 16, false, 1, 3);
+    HICON h100_16 = kc_icon_cache_get(&cache, "100", 16, false, false);
+    verify_hicon_layout(h100_16, 16, KC_FG_WHITE, 7, 9);
 
-    HICON herr = kc_icon_cache_get(&cache, "!", 16, false);
-    verify_hicon_layout(herr, 16, false, 7, 9);
+    HICON hdash = kc_icon_cache_get(&cache, "--", 16, false, false);
+    verify_hicon_layout(hdash, 16, KC_FG_WHITE, 1, 3);
 
-    /* Switching theme invalidates old cache and renders dark foreground ink. */
-    HICON h46_light = kc_icon_cache_get(&cache, "46", 24, true);
-    verify_hicon_layout(h46_light, 24, true, 13, 13);
+    HICON herr = kc_icon_cache_get(&cache, "!", 16, false, false);
+    verify_hicon_layout(herr, 16, KC_FG_WHITE, 7, 9);
+
+    HICON h46_light = kc_icon_cache_get(&cache, "46", 24, true, false);
+    verify_hicon_layout(h46_light, 24, KC_FG_DARK, 13, 13);
     KC_CHECK(cache.count == 1U);
+
+    HICON h12_light_low = kc_icon_cache_get(&cache, "12", 24, true, true);
+    verify_hicon_layout(h12_light_low, 24, KC_FG_RED, 13, 13);
 
     kc_icon_cache_destroy(&cache);
     KC_CHECK(cache.count == 0U);

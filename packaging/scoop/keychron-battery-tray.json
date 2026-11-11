@@ -1,0 +1,30 @@
+{
+  "version": "1.1.0",
+  "description": "Lightweight native C17/Win32 Windows system tray battery indicator and CLI for Keychron wireless mice",
+  "homepage": "https://github.com/mammadow/keychron-battery-tray",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/mammadow/keychron-battery-tray/releases/download/v1.1.0/keychron-battery-win64-v1.1.0.zip",
+      "hash": "REPLACE_WITH_RELEASE_ZIP_SHA256"
+    }
+  },
+  "bin": [
+    "keychron-battery.exe",
+    "keychron-battery-tray.exe"
+  ],
+  "shortcuts": [
+    [
+      "keychron-battery-tray.exe",
+      "Keychron Battery Tray"
+    ]
+  ],
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/mammadow/keychron-battery-tray/releases/download/v$version/keychron-battery-win64-v$version.zip"
+      }
+    }
+  }
+}

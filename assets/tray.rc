@@ -1,4 +1,5 @@
 1 24 "app.manifest"
+101 ICON "app.ico"
 
 #define KC_FILE_DESC     "Keychron Wireless Mouse Battery Tray"
 #define KC_INTERNAL_NAME "keychron-battery-tray"

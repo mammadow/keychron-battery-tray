@@ -142,8 +142,10 @@ int wmain(int argc, wchar_t **argv) {
     kc_hid_session_init(&session);
 
     uint8_t pct = 0;
+    bool charging = false;
     kc_hid_status_t st = kc_hid_query_battery(
-        &session, vid, pid, interface_num, 3U, (uint32_t)timeout_ms, NULL, debug, stderr, &pct);
+        &session, vid, pid, interface_num, 3U, (uint32_t)timeout_ms,
+        NULL, debug, stderr, &pct, &charging);
     if (st != KC_HID_OK) {
         if (json_mode) {
             char err_utf8[128];
@@ -168,12 +170,13 @@ int wmain(int argc, wchar_t **argv) {
             kc_json_escape(prod_utf8, prod_esc, sizeof(prod_esc));
         }
         printf("{\"ok\":true,\"vid\":\"0x%04x\",\"pid\":\"0x%04x\",\"interface\":%d,"
-               "\"product\":\"%s\",\"battery\":%u}\n",
-               out_vid, out_pid, out_iface, prod_esc, (unsigned)pct);
+               "\"product\":\"%s\",\"battery\":%u,\"charging\":%s}\n",
+               out_vid, out_pid, out_iface, prod_esc, (unsigned)pct,
+               charging ? "true" : "false");
     } else if (raw_mode) {
         wprintf(L"%u\n", (unsigned)pct);
     } else {
-        wprintf(L"Battery: %u%%\n", (unsigned)pct);
+        wprintf(L"Battery: %u%%%ls\n", (unsigned)pct, charging ? L" (charging)" : L"");
     }
     return 0;
 }

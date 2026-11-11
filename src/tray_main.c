@@ -16,9 +16,13 @@
 #define WM_TRAY_CALLBACK      (WM_USER + 11)
 #define WM_APP_POLL_RESULT    (WM_APP + 1)
 
+#define IDI_APP_ICON          101U
 #define TRAY_ICON_UID         1U
 #define TIMER_RESUME_REFRESH  1U
 #define TIMER_USB_REFRESH     2U
+#define TIMER_INPUT_WAKE      3U
+
+#define KC_RAW_CACHE_CAP      8U
 
 #define IDM_STATUS            1001U
 #define IDM_REFRESH           1002U
@@ -45,6 +49,11 @@
 static const GUID KC_GUID_CONSOLE_DISPLAY_STATE = {
     0x6fe69556U, 0x704aU, 0x47a0U, {0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47}
 };
+
+typedef struct kc_raw_dev_entry {
+    HANDLE hdevice;
+    bool is_match;
+} kc_raw_dev_entry_t;
 
 typedef struct kc_tray_app {
     HINSTANCE hinst;
@@ -81,6 +90,11 @@ typedef struct kc_tray_app {
     HICON last_hicon;
     int icon_size;
     bool light_taskbar;
+    bool last_is_low;
+
+    bool raw_watch_armed;
+    kc_raw_dev_entry_t raw_cache[KC_RAW_CACHE_CAP];
+    size_t raw_cache_count;
 } kc_tray_app_t;
 
 static kc_tray_app_t g_app;
@@ -127,29 +141,37 @@ static const wchar_t *kc_device_label(const kc_tray_app_t *app) {
 static void kc_build_display_state(kc_tray_app_t *app,
                                    char out_glyph[8],
                                    wchar_t out_tip[128],
+                                   bool *out_is_low,
                                    bool *out_low_alert) {
+    *out_is_low = false;
     *out_low_alert = false;
     const wchar_t *name = kc_device_label(app);
 
     if (app->poll_state.has_reading) {
-        if (kc_should_show_error_glyph(&app->poll_state)) {
+        bool err_glyph = kc_should_show_error_glyph(&app->poll_state);
+        if (err_glyph) {
             strncpy(out_glyph, "!", 8);
         } else {
-            _snprintf(out_glyph, 8, "%u", (unsigned)app->poll_state.last_pct);
+            snprintf(out_glyph, 8, "%u", (unsigned)app->poll_state.last_pct);
+            *out_is_low = (!app->poll_state.last_charging &&
+                           app->settings.low_alert_pct > 0U &&
+                           app->poll_state.last_pct <= app->settings.low_alert_pct);
         }
 
         if (app->poll_state.consecutive_failures == 0U) {
             *out_low_alert = kc_check_low_battery_alert(&app->poll_state, app->settings.low_alert_pct);
+            const wchar_t *chg_str = app->poll_state.last_charging ? L"charging, " : L"";
             if (app->has_reading_time) {
                 _snwprintf(out_tip, 128,
-                           L"%ls: %u%% (%02u:%02u)",
+                           L"%ls: %u%% (%ls%02u:%02u)",
                            name,
                            (unsigned)app->poll_state.last_pct,
+                           chg_str,
                            (unsigned)app->last_reading_time.wHour,
                            (unsigned)app->last_reading_time.wMinute);
             } else {
                 _snwprintf(out_tip, 128,
-                           L"%ls: %u%%",
+                           app->poll_state.last_charging ? L"%ls: %u%% (charging)" : L"%ls: %u%%",
                            name,
                            (unsigned)app->poll_state.last_pct);
             }
@@ -178,16 +200,23 @@ static void kc_build_display_state(kc_tray_app_t *app,
 static void kc_sync_tray_icon(kc_tray_app_t *app, bool force_add) {
     char glyph[8];
     wchar_t tip[128];
+    bool is_low = false;
     bool low_alert = false;
 
-    kc_build_display_state(app, glyph, tip, &low_alert);
+    kc_build_display_state(app, glyph, tip, &is_low, &low_alert);
 
-    HICON hicon = kc_icon_cache_get(&app->icon_cache, glyph, app->icon_size, app->light_taskbar);
+    HICON hicon = kc_icon_cache_get(
+        &app->icon_cache, glyph, app->icon_size, app->light_taskbar, is_low);
     if (!hicon) {
+        if (low_alert) {
+            app->poll_state.low_battery_notified = false;
+        }
         return;
     }
 
-    bool icon_changed = (hicon != app->last_hicon) || (strcmp(glyph, app->last_glyph) != 0);
+    bool icon_changed = (hicon != app->last_hicon) ||
+                        (is_low != app->last_is_low) ||
+                        (strcmp(glyph, app->last_glyph) != 0);
     bool tip_changed = (wcscmp(tip, app->last_tip) != 0);
 
     if (!force_add && app->tray_added && !icon_changed && !tip_changed && !low_alert) {
@@ -204,10 +233,27 @@ static void kc_sync_tray_icon(kc_tray_app_t *app, bool force_add) {
     wcsncpy(nid.szTip, tip, 127);
     nid.szTip[127] = L'\0';
 
+    if (low_alert) {
+        nid.dwInfoFlags = NIIF_WARNING | NIIF_RESPECT_QUIET_TIME;
+        wcsncpy(nid.szInfoTitle, L"Keychron Mouse Battery Low", 63);
+        _snwprintf(nid.szInfo, 255, L"%ls battery is at %u%%.",
+                   kc_device_label(app),
+                   (unsigned)app->poll_state.last_pct);
+        nid.szInfo[255] = L'\0';
+    }
+
     if (force_add || !app->tray_added) {
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+        if (low_alert) {
+            nid.uFlags |= NIF_INFO;
+        }
         if (Shell_NotifyIconW(NIM_ADD, &nid)) {
             app->tray_added = true;
+        } else {
+            if (low_alert) {
+                app->poll_state.low_battery_notified = false;
+            }
+            return;
         }
     } else {
         nid.uFlags = NIF_SHOWTIP;
@@ -219,16 +265,12 @@ static void kc_sync_tray_icon(kc_tray_app_t *app, bool force_add) {
         }
         if (low_alert) {
             nid.uFlags |= NIF_INFO;
-            nid.dwInfoFlags = NIIF_WARNING | NIIF_RESPECT_QUIET_TIME;
-            wcsncpy(nid.szInfoTitle, L"Keychron Mouse Battery Low", 63);
-            _snwprintf(nid.szInfo, 255, L"%ls battery is at %u%%.",
-                       kc_device_label(app),
-                       (unsigned)app->poll_state.last_pct);
         }
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
 
     app->last_hicon = hicon;
+    app->last_is_low = is_low;
     strncpy(app->last_glyph, glyph, sizeof(app->last_glyph) - 1);
     app->last_glyph[sizeof(app->last_glyph) - 1] = '\0';
     wcsncpy(app->last_tip, tip, 127);
@@ -266,14 +308,14 @@ static DWORD WINAPI kc_worker_proc(LPVOID param) {
         bool in_backoff = (app->poll_state.consecutive_failures > 0U);
         LeaveCriticalSection(&app->state_lock);
 
-        /* Use 1 fast attempt during sleep backoff, 2 attempts when healthy/interactive. */
         uint32_t retries = in_backoff ? 1U : 2U;
         uint32_t timeout_ms = in_backoff ? 1000U : 1500U;
 
         uint8_t pct = 0;
+        bool charging = false;
         kc_hid_status_t st = kc_hid_query_battery(
             &local_session, vid, pid, iface, retries, timeout_ms,
-            app->stop_event, false, NULL, &pct);
+            app->stop_event, false, NULL, &pct, &charging);
 
         if (st == KC_HID_CANCELLED) {
             break;
@@ -291,7 +333,7 @@ static DWORD WINAPI kc_worker_proc(LPVOID param) {
         }
         app->refresh_in_flight = false;
         if (st == KC_HID_OK) {
-            kc_poll_state_record_success(&app->poll_state, pct, GetTickCount64());
+            kc_poll_state_record_success(&app->poll_state, pct, charging, GetTickCount64());
         } else {
             kc_poll_state_record_failure(&app->poll_state);
         }
@@ -346,15 +388,19 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
     poll_minutes = app->settings.poll_minutes;
     low_pct = app->settings.low_alert_pct;
     const wchar_t *name = kc_device_label(app);
+    const wchar_t *chg_str = app->poll_state.last_charging ? L"charging, " : L"";
     if (app->poll_state.has_reading && app->has_reading_time) {
         _snwprintf(status_line, 128,
-                   L"%ls: %u%% (%02u:%02u)",
+                   L"%ls: %u%% (%ls%02u:%02u)",
                    name,
                    (unsigned)app->poll_state.last_pct,
+                   chg_str,
                    (unsigned)app->last_reading_time.wHour,
                    (unsigned)app->last_reading_time.wMinute);
     } else if (app->poll_state.has_reading) {
-        _snwprintf(status_line, 128, L"%ls: %u%%", name, (unsigned)app->poll_state.last_pct);
+        _snwprintf(status_line, 128,
+                   app->poll_state.last_charging ? L"%ls: %u%% (charging)" : L"%ls: %u%%",
+                   name, (unsigned)app->poll_state.last_pct);
     } else {
         _snwprintf(status_line, 128, L"%ls: %ls", name, kc_hid_status_text_w(app->last_status));
     }
@@ -396,7 +442,7 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
         app->hwnd,
         NULL);
     PostMessageW(app->hwnd, WM_NULL, 0, 0);
-    DestroyMenu(menu); /* Also destroys attached submenus poll_sub and alert_sub. */
+    DestroyMenu(menu);
 
     switch (cmd) {
         case IDM_REFRESH:
@@ -431,6 +477,7 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
             app->settings.low_alert_pct = pct;
             app->poll_state.low_battery_notified = false;
             kc_settings_save(&app->settings);
+            kc_sync_tray_icon(app, false);
             LeaveCriticalSection(&app->state_lock);
             break;
         }
@@ -445,6 +492,67 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
 static bool kc_is_hid_devinterface_event(LPARAM lparam) {
     const DEV_BROADCAST_HDR *hdr = (const DEV_BROADCAST_HDR *)lparam;
     return hdr && hdr->dbch_devicetype == DBT_DEVTYP_DEVICEINTERFACE;
+}
+
+static void kc_set_raw_mouse_watch(kc_tray_app_t *app, bool enable) {
+    if (!app || !app->hwnd || app->raw_watch_armed == enable) {
+        return;
+    }
+    RAWINPUTDEVICE rid;
+    memset(&rid, 0, sizeof(rid));
+    rid.usUsagePage = 0x01U; /* HID_USAGE_PAGE_GENERIC */
+    rid.usUsage = 0x02U;     /* HID_USAGE_GENERIC_MOUSE */
+    rid.dwFlags = enable ? RIDEV_INPUTSINK : RIDEV_REMOVE;
+    rid.hwndTarget = enable ? app->hwnd : NULL;
+
+    if (RegisterRawInputDevices(&rid, 1U, sizeof(rid))) {
+        app->raw_watch_armed = enable;
+    }
+}
+
+static bool kc_raw_device_is_keychron(kc_tray_app_t *app, HANDLE hdev) {
+    if (!hdev) {
+        return false;
+    }
+    for (size_t i = 0; i < app->raw_cache_count; ++i) {
+        if (app->raw_cache[i].hdevice == hdev) {
+            return app->raw_cache[i].is_match;
+        }
+    }
+
+    wchar_t dev_name[512];
+    UINT chars = (UINT)(sizeof(dev_name) / sizeof(dev_name[0]));
+    memset(dev_name, 0, sizeof(dev_name));
+    bool matched = false;
+    if (GetRawInputDeviceInfoW(hdev, RIDI_DEVICENAME, dev_name, &chars) != (UINT)-1) {
+        matched = kc_raw_path_matches_target_w(dev_name, app->target_vid, app->target_pid);
+    }
+
+    if (app->raw_cache_count < KC_RAW_CACHE_CAP) {
+        app->raw_cache[app->raw_cache_count].hdevice = hdev;
+        app->raw_cache[app->raw_cache_count].is_match = matched;
+        app->raw_cache_count++;
+    }
+    return matched;
+}
+
+static void kc_handle_raw_input(kc_tray_app_t *app, HRAWINPUT hraw) {
+    if (!app->raw_watch_armed) {
+        return;
+    }
+    RAWINPUTHEADER hdr;
+    UINT sz = sizeof(hdr);
+    if (GetRawInputData(hraw, RID_HEADER, &hdr, &sz, sizeof(hdr)) != sizeof(hdr)) {
+        return;
+    }
+    if (hdr.dwType != RIM_TYPEMOUSE) {
+        return;
+    }
+    if (kc_raw_device_is_keychron(app, hdr.hDevice)) {
+        /* Disarm immediately so high-polling mice don't flood WM_INPUT once awake. */
+        kc_set_raw_mouse_watch(app, false);
+        SetTimer(app->hwnd, TIMER_INPUT_WAKE, 250U, NULL);
+    }
 }
 
 static LRESULT CALLBACK kc_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -467,16 +575,26 @@ static LRESULT CALLBACK kc_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
             }
             return 0;
 
-        case WM_APP_POLL_RESULT:
+        case WM_APP_POLL_RESULT: {
+            bool arm_raw_watch = false;
             EnterCriticalSection(&app->state_lock);
             app->last_status = (kc_hid_status_t)wparam;
             if (app->last_status == KC_HID_OK) {
                 GetLocalTime(&app->last_reading_time);
                 app->has_reading_time = true;
+            } else if (app->last_status != KC_HID_NOT_FOUND &&
+                       app->poll_state.consecutive_failures > 0U) {
+                arm_raw_watch = true;
             }
             kc_sync_tray_icon(app, false);
             LeaveCriticalSection(&app->state_lock);
+            kc_set_raw_mouse_watch(app, arm_raw_watch);
             return 0;
+        }
+
+        case WM_INPUT:
+            kc_handle_raw_input(app, (HRAWINPUT)lparam);
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
 
         case WM_POWERBROADCAST:
             if (wparam == PBT_APMRESUMEAUTOMATIC || wparam == PBT_APMRESUMESUSPEND) {
@@ -500,12 +618,15 @@ static LRESULT CALLBACK kc_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
         case WM_DEVICECHANGE:
             if ((wparam == DBT_DEVICEARRIVAL || wparam == DBT_DEVICEREMOVECOMPLETE) &&
                 kc_is_hid_devinterface_event(lparam)) {
+                app->raw_cache_count = 0U;
                 SetTimer(hwnd, TIMER_USB_REFRESH, 500U, NULL);
             }
             return TRUE;
 
         case WM_TIMER:
-            if (wparam == TIMER_RESUME_REFRESH || wparam == TIMER_USB_REFRESH) {
+            if (wparam == TIMER_RESUME_REFRESH ||
+                wparam == TIMER_USB_REFRESH ||
+                wparam == TIMER_INPUT_WAKE) {
                 KillTimer(hwnd, wparam);
                 kc_request_refresh(app, wparam == TIMER_USB_REFRESH);
             }
@@ -550,6 +671,7 @@ static LRESULT CALLBACK kc_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
             return 0;
 
         case WM_DESTROY:
+            kc_set_raw_mouse_watch(app, false);
             if (app->tray_added) {
                 NOTIFYICONDATAW nid;
                 memset(&nid, 0, sizeof(nid));
@@ -611,6 +733,10 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE hprev, PWSTR cmdline, int show) {
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = kc_wnd_proc;
     wc.hInstance = hinst;
+    wc.hIcon = LoadIconW(hinst, MAKEINTRESOURCEW(IDI_APP_ICON));
+    wc.hIconSm = (HICON)LoadImageW(
+        hinst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
     wc.lpszClassName = L"KeychronBatteryTrayWindow";
 
     if (!RegisterClassExW(&wc)) {
@@ -621,7 +747,6 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE hprev, PWSTR cmdline, int show) {
         return 1;
     }
 
-    /* Top-level hidden popup window is required to receive TaskbarCreated broadcasts. */
     g_app.hwnd = CreateWindowExW(
         0,
         wc.lpszClassName,

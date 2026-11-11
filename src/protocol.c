@@ -34,19 +34,30 @@ size_t kc_build_status_report(uint8_t *buf, size_t buf_cap, uint16_t report_len)
     return target;
 }
 
-bool kc_parse_battery_response(const uint8_t *buf, size_t len, uint8_t *out_pct) {
+bool kc_parse_battery_status(const uint8_t *buf,
+                             size_t len,
+                             uint8_t *out_pct,
+                             bool *out_charging) {
     if (!buf || !out_pct || len <= KEYCHRON_BATTERY_OFFSET) {
         return false;
     }
     if (buf[0] != KEYCHRON_REPORT_ID_RESP || buf[1] != KEYCHRON_CMD_STATUS) {
         return false;
     }
-    uint8_t pct = buf[KEYCHRON_BATTERY_OFFSET];
+    uint8_t raw = buf[KEYCHRON_BATTERY_OFFSET];
+    uint8_t pct = (uint8_t)(raw & KEYCHRON_BATTERY_LEVEL);
     if (pct > 100U) {
         return false;
     }
     *out_pct = pct;
+    if (out_charging) {
+        *out_charging = (raw & KEYCHRON_BATTERY_CHARGING) != 0U;
+    }
     return true;
+}
+
+bool kc_parse_battery_response(const uint8_t *buf, size_t len, uint8_t *out_pct) {
+    return kc_parse_battery_status(buf, len, out_pct, NULL);
 }
 
 int kc_extract_mi_from_path_w(const wchar_t *path) {
@@ -69,6 +80,131 @@ int kc_extract_mi_from_path_w(const wchar_t *path) {
         }
     }
     return -1;
+}
+
+static bool kc_find_hex_tag_u16_w(const wchar_t *path, const char *tag3, uint16_t *out_val) {
+    if (!path || !tag3) {
+        return false;
+    }
+    wchar_t t0 = (wchar_t)(unsigned char)tag3[0];
+    wchar_t t1 = (wchar_t)(unsigned char)tag3[1];
+    wchar_t t2 = (wchar_t)(unsigned char)tag3[2];
+
+    for (size_t i = 0; path[i] != L'\0'; ++i) {
+        if (kc_towupper_ascii(path[i]) == t0 &&
+            kc_towupper_ascii(path[i + 1]) == t1 &&
+            kc_towupper_ascii(path[i + 2]) == t2 &&
+            (path[i + 3] == L'_' || path[i + 3] == L'&')) {
+            uint32_t acc = 0U;
+            size_t digits = 0U;
+            size_t k = i + 4U;
+            while (digits < 8U) {
+                int hv = kc_hex_val(path[k]);
+                if (hv < 0) {
+                    break;
+                }
+                acc = (acc << 4) | (uint32_t)hv;
+                digits++;
+                k++;
+            }
+            wchar_t term = path[k];
+            if (digits >= 4U &&
+                (term == L'\0' || term == L'&' || term == L'_' || term == L'#' || term == L'\\')) {
+                *out_val = (uint16_t)(acc & 0xFFFFU);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool kc_path_might_match_vid_w(const wchar_t *path, uint16_t filter_vid) {
+    if (!path || filter_vid == 0U) {
+        return true;
+    }
+    uint16_t found_vid = 0U;
+    if (!kc_find_hex_tag_u16_w(path, "VID", &found_vid)) {
+        return true;
+    }
+    return found_vid == filter_vid;
+}
+
+bool kc_raw_path_matches_target_w(const wchar_t *path,
+                                  uint16_t target_vid,
+                                  uint16_t target_pid) {
+    if (!path || !path[0]) {
+        return false;
+    }
+    uint16_t found_vid = 0U;
+    if (!kc_find_hex_tag_u16_w(path, "VID", &found_vid)) {
+        return false;
+    }
+    if (target_vid != 0U && found_vid != target_vid) {
+        return false;
+    }
+    if (target_pid != 0U) {
+        uint16_t found_pid = 0U;
+        if (!kc_find_hex_tag_u16_w(path, "PID", &found_pid) || found_pid != target_pid) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool kc_contains_ascii_ci_w(const wchar_t *haystack, const char *needle) {
+    if (!haystack || !needle || !needle[0]) {
+        return false;
+    }
+    size_t nlen = strlen(needle);
+    for (size_t i = 0; haystack[i] != L'\0'; ++i) {
+        size_t j = 0;
+        while (j < nlen && haystack[i + j] != L'\0') {
+            wchar_t hc = kc_towupper_ascii(haystack[i + j]);
+            wchar_t nc = kc_towupper_ascii((wchar_t)(unsigned char)needle[j]);
+            if (hc != nc) {
+                break;
+            }
+            ++j;
+        }
+        if (j == nlen) {
+            return true;
+        }
+    }
+    return false;
+}
+
+uint16_t kc_clamp_report_len(uint16_t reported) {
+    if (reported < 2U) {
+        return KEYCHRON_REPORT_SIZE;
+    }
+    if (reported > KEYCHRON_MAX_REPORT_SIZE) {
+        return KEYCHRON_MAX_REPORT_SIZE;
+    }
+    return reported;
+}
+
+uint32_t kc_clamp_poll_minutes(uint32_t minutes) {
+    switch (minutes) {
+        case 5U:
+        case 15U:
+        case 30U:
+        case 60U:
+            return minutes;
+        default:
+            return 30U;
+    }
+}
+
+uint8_t kc_clamp_low_alert(uint32_t pct) {
+    switch (pct) {
+        case 0U:
+        case 10U:
+        case 15U:
+        case 20U:
+            return (uint8_t)pct;
+        default:
+            return (uint8_t)KEYCHRON_LOW_BATTERY_PCT;
+    }
 }
 
 int kc_score_candidate(const kc_hid_candidate_t *cand,
@@ -110,6 +246,10 @@ int kc_score_candidate(const kc_hid_candidate_t *cand,
     if (cand->interface_number == KEYCHRON_DEFAULT_INTERFACE) {
         score += 300;
     }
+    /* Prefer direct wired mouse over receiver dongle when both are connected. */
+    if (preferred_pid == 0U && cand->pid != 0U && cand->pid != KEYCHRON_RECEIVER_PID) {
+        score += 50;
+    }
     return score;
 }
 
@@ -120,12 +260,16 @@ void kc_poll_state_init(kc_poll_state_t *st) {
     memset(st, 0, sizeof(*st));
 }
 
-void kc_poll_state_record_success(kc_poll_state_t *st, uint8_t pct, uint64_t now_ms) {
+void kc_poll_state_record_success(kc_poll_state_t *st,
+                                  uint8_t pct,
+                                  bool charging,
+                                  uint64_t now_ms) {
     if (!st) {
         return;
     }
     st->has_reading = true;
     st->last_pct = pct;
+    st->last_charging = charging;
     st->last_success_ms = now_ms;
     st->consecutive_failures = 0;
 }
@@ -175,7 +319,8 @@ bool kc_should_show_error_glyph(const kc_poll_state_t *st) {
 }
 
 bool kc_check_low_battery_alert(kc_poll_state_t *st, uint8_t threshold_pct) {
-    if (!st || threshold_pct == 0U || !st->has_reading || st->consecutive_failures > 0U) {
+    if (!st || threshold_pct == 0U || !st->has_reading ||
+        st->last_charging || st->consecutive_failures > 0U) {
         return false;
     }
     if (st->last_pct <= threshold_pct) {

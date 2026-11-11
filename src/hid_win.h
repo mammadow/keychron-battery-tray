@@ -68,8 +68,10 @@ bool kc_hid_find_best_device(uint16_t vid,
                              kc_hid_device_info_t *out_info);
 
 /**
- * Query battery percentage using cached device path when valid, with
- * OVERLAPPED I/O cancellation via cancel_event.
+ * Query battery percentage and charging state using cached device path when valid,
+ * with OVERLAPPED I/O cancellation via cancel_event. Falls back to standard HID
+ * Battery Strength (0x06/0x20) and BLE GATT Battery Service (0x180F/0x2A19) in
+ * auto-detect mode when no vendor interface is found.
  */
 kc_hid_status_t kc_hid_query_battery(kc_hid_session_t *session,
                                      uint16_t vid,
@@ -80,7 +82,8 @@ kc_hid_status_t kc_hid_query_battery(kc_hid_session_t *session,
                                      HANDLE cancel_event,
                                      bool debug,
                                      FILE *debug_stream,
-                                     uint8_t *out_pct);
+                                     uint8_t *out_pct,
+                                     bool *out_charging);
 
 const wchar_t *kc_hid_status_text_w(kc_hid_status_t status);
 

@@ -45,6 +45,7 @@ jobs:
           Copy-Item build/keychron-battery-tray.exe dist/stage/
           Copy-Item build/keychron-battery.exe dist/stage/
           Copy-Item README.md dist/stage/
+          Copy-Item LICENSE dist/stage/
           $zip = "dist/keychron-battery-win64-$tag.zip"
           Compress-Archive -Path dist/stage/* -DestinationPath $zip -Force
           $sums = @(

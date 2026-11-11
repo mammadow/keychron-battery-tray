@@ -29,9 +29,22 @@ static void test_build_and_parse_report(void) {
     resp[KEYCHRON_BATTERY_OFFSET] = 46U;
 
     uint8_t pct = 255U;
-    KC_CHECK(kc_parse_battery_response(resp, sizeof(resp), &pct));
-    KC_CHECK(pct == 46U);
+    bool charging = true;
+    KC_CHECK(kc_parse_battery_status(resp, sizeof(resp), &pct, &charging));
+    KC_CHECK(pct == 46U && !charging);
 
+    /* Bit 7 (0x80) encodes charging state; level sits in bits 0..6. */
+    resp[KEYCHRON_BATTERY_OFFSET] = (uint8_t)(0x80U | 46U);
+    KC_CHECK(kc_parse_battery_status(resp, sizeof(resp), &pct, &charging));
+    KC_CHECK(pct == 46U && charging);
+
+    resp[KEYCHRON_BATTERY_OFFSET] = (uint8_t)(0x80U | 100U);
+    KC_CHECK(kc_parse_battery_status(resp, sizeof(resp), &pct, &charging));
+    KC_CHECK(pct == 100U && charging);
+
+    /* Reject out-of-range level (>100 even with bit 7 masked), wrong cmd/id, short buffers. */
+    resp[KEYCHRON_BATTERY_OFFSET] = (uint8_t)(0x80U | 101U);
+    KC_CHECK(!kc_parse_battery_status(resp, sizeof(resp), &pct, &charging));
     resp[KEYCHRON_BATTERY_OFFSET] = 101U;
     KC_CHECK(!kc_parse_battery_response(resp, sizeof(resp), &pct));
 
@@ -48,7 +61,7 @@ static void test_build_and_parse_report(void) {
     KC_CHECK(!kc_parse_battery_response(resp, sizeof(resp), &pct));
 }
 
-static void test_extract_mi_from_path(void) {
+static void test_path_helpers(void) {
     KC_CHECK(kc_extract_mi_from_path_w(
         L"\\\\?\\HID#VID_3434&PID_D028&MI_04#7&189d5f95&0&0000#{4d1e55b2}") == 4);
     KC_CHECK(kc_extract_mi_from_path_w(
@@ -56,6 +69,30 @@ static void test_extract_mi_from_path(void) {
     KC_CHECK(kc_extract_mi_from_path_w(
         L"\\\\?\\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev&VID&023434") == -1);
     KC_CHECK(kc_extract_mi_from_path_w(NULL) == -1);
+
+    KC_CHECK(kc_path_might_match_vid_w(L"\\\\?\\HID#VID_3434&PID_D028&MI_04", 0x3434U));
+    KC_CHECK(!kc_path_might_match_vid_w(L"\\\\?\\HID#VID_046D&PID_C548&MI_02", 0x3434U));
+    KC_CHECK(kc_path_might_match_vid_w(L"\\\\?\\BTHENUM#Dev_11223344", 0x3434U));
+
+    KC_CHECK(kc_raw_path_matches_target_w(
+        L"\\\\?\\HID#VID_3434&PID_D028&MI_00#7&1c6adf5c&0&0000#{378de44c}", 0x3434U, 0U));
+    KC_CHECK(kc_raw_path_matches_target_w(
+        L"\\\\?\\HID#VID_3434&PID_D028&MI_00#7&1c6adf5c&0&0000#{378de44c}", 0x3434U, 0xD028U));
+    KC_CHECK(!kc_raw_path_matches_target_w(
+        L"\\\\?\\HID#VID_3434&PID_D028&MI_00#7&1c6adf5c&0&0000#{378de44c}", 0x3434U, 0xD048U));
+    KC_CHECK(kc_raw_path_matches_target_w(
+        L"\\\\?\\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev&VID&023434_PID&D048#8&0",
+        0x3434U, 0xD048U));
+    KC_CHECK(!kc_raw_path_matches_target_w(
+        L"\\\\?\\HID#PIXA3848&Col01#5&183f45c0&0&0000#{378de44c}", 0x3434U, 0U));
+    KC_CHECK(!kc_raw_path_matches_target_w(
+        L"\\\\?\\ROOT#FEIZHI_VIRTUAL_MOUSE#0000#{378de44c}", 0x3434U, 0U));
+    KC_CHECK(!kc_raw_path_matches_target_w(
+        L"\\\\?\\HID#VID_046D&PID_C548&MI_00#7&0000#{378de44c}", 0x3434U, 0U));
+    KC_CHECK(!kc_raw_path_matches_target_w(NULL, 0x3434U, 0U));
+
+    KC_CHECK(kc_contains_ascii_ci_w(L"Keychron M5 Wireless", "keychron"));
+    KC_CHECK(!kc_contains_ascii_ci_w(L"Logitech MX Master", "keychron"));
 }
 
 static void test_score_candidate_ranking(void) {
@@ -63,7 +100,8 @@ static void test_score_candidate_ranking(void) {
     kc_hid_candidate_t kbd = {0x3434, 0xD028, 0x0001, 0x0006, 1};
     kc_hid_candidate_t consumer = {0x3434, 0xD028, 0x000C, 0x0001, 1};
     kc_hid_candidate_t via = {0x3434, 0xD028, 0xFF60, 0x0061, 2};
-    kc_hid_candidate_t vendor = {0x3434, 0xD028, 0xFFC1, 0x0001, 4};
+    kc_hid_candidate_t dongle = {0x3434, 0xD028, 0xFFC1, 0x0001, 4};
+    kc_hid_candidate_t wired = {0x3434, 0xD048, 0xFFC1, 0x0001, 4};
     kc_hid_candidate_t other_vid = {0x046D, 0xC548, 0xFFC1, 0x0001, 4};
 
     KC_CHECK(kc_score_candidate(&mouse, 0x3434, 0, -1) < 0);
@@ -72,15 +110,34 @@ static void test_score_candidate_ranking(void) {
     KC_CHECK(kc_score_candidate(&other_vid, 0x3434, 0, -1) < 0);
 
     int s_via = kc_score_candidate(&via, 0x3434, 0, -1);
-    int s_vendor = kc_score_candidate(&vendor, 0x3434, 0, -1);
+    int s_dongle = kc_score_candidate(&dongle, 0x3434, 0, -1);
+    int s_wired = kc_score_candidate(&wired, 0x3434, 0, -1);
     KC_CHECK(s_via > 0);
-    KC_CHECK(s_vendor > s_via);
+    KC_CHECK(s_dongle > s_via);
+    KC_CHECK(s_wired > s_dongle);
 
     KC_CHECK(kc_score_candidate(&via, 0x3434, 0xD028, 2) > 0);
-    KC_CHECK(kc_score_candidate(&vendor, 0x3434, 0xD028, 2) < 0);
+    KC_CHECK(kc_score_candidate(&dongle, 0x3434, 0xD028, 2) < 0);
 }
 
-static void test_backoff_and_custom_interval(void) {
+static void test_backoff_and_clamps(void) {
+    KC_CHECK(kc_clamp_poll_minutes(5U) == 5U);
+    KC_CHECK(kc_clamp_poll_minutes(15U) == 15U);
+    KC_CHECK(kc_clamp_poll_minutes(30U) == 30U);
+    KC_CHECK(kc_clamp_poll_minutes(60U) == 60U);
+    KC_CHECK(kc_clamp_poll_minutes(42U) == 30U);
+
+    KC_CHECK(kc_clamp_low_alert(0U) == 0U);
+    KC_CHECK(kc_clamp_low_alert(10U) == 10U);
+    KC_CHECK(kc_clamp_low_alert(15U) == 15U);
+    KC_CHECK(kc_clamp_low_alert(20U) == 20U);
+    KC_CHECK(kc_clamp_low_alert(99U) == 15U);
+
+    KC_CHECK(kc_clamp_report_len(0U) == KEYCHRON_REPORT_SIZE);
+    KC_CHECK(kc_clamp_report_len(1U) == KEYCHRON_REPORT_SIZE);
+    KC_CHECK(kc_clamp_report_len(64U) == 64U);
+    KC_CHECK(kc_clamp_report_len(512U) == KEYCHRON_MAX_REPORT_SIZE);
+
     kc_poll_state_t st;
     kc_poll_state_init(&st);
 
@@ -93,7 +150,7 @@ static void test_backoff_and_custom_interval(void) {
     KC_CHECK(kc_should_show_error_glyph(&st));
     KC_CHECK(kc_next_wait_ms(&st) == 30U * 1000U);
 
-    kc_poll_state_record_success(&st, 82U, 1000ULL);
+    kc_poll_state_record_success(&st, 82U, false, 1000ULL);
     KC_CHECK(!kc_should_show_error_glyph(&st));
     KC_CHECK(kc_next_wait_ms(&st) == KEYCHRON_POLL_INTERVAL_MS);
 
@@ -115,24 +172,28 @@ static void test_backoff_and_custom_interval(void) {
     KC_CHECK(kc_next_wait_ms(&st) == 300U * 1000U);
 }
 
-static void test_low_battery_hysteresis(void) {
+static void test_low_battery_hysteresis_and_charging(void) {
     kc_poll_state_t st;
     kc_poll_state_init(&st);
 
-    kc_poll_state_record_success(&st, 10U, 50ULL);
+    /* Never alert while charging, even if <= threshold. */
+    kc_poll_state_record_success(&st, 10U, true, 25ULL);
+    KC_CHECK(!kc_check_low_battery_alert(&st, 15U));
+
+    kc_poll_state_record_success(&st, 10U, false, 50ULL);
     KC_CHECK(!kc_check_low_battery_alert(&st, 0U)); /* 0 disables alerts */
 
-    kc_poll_state_record_success(&st, 15U, 100ULL);
+    kc_poll_state_record_success(&st, 15U, false, 100ULL);
     KC_CHECK(kc_check_low_battery_alert(&st, 15U));
     KC_CHECK(!kc_check_low_battery_alert(&st, 15U));
 
-    kc_poll_state_record_success(&st, 18U, 200ULL);
+    kc_poll_state_record_success(&st, 18U, false, 200ULL);
     KC_CHECK(!kc_check_low_battery_alert(&st, 15U));
 
-    kc_poll_state_record_success(&st, 20U, 300ULL);
+    kc_poll_state_record_success(&st, 20U, false, 300ULL);
     KC_CHECK(!kc_check_low_battery_alert(&st, 15U));
 
-    kc_poll_state_record_success(&st, 14U, 400ULL);
+    kc_poll_state_record_success(&st, 14U, false, 400ULL);
     KC_CHECK(kc_check_low_battery_alert(&st, 15U));
 }
 
@@ -182,10 +243,10 @@ static void test_glyph_bbox_and_premul_blit(void) {
 
 int main(void) {
     test_build_and_parse_report();
-    test_extract_mi_from_path();
+    test_path_helpers();
     test_score_candidate_ranking();
-    test_backoff_and_custom_interval();
-    test_low_battery_hysteresis();
+    test_backoff_and_clamps();
+    test_low_battery_hysteresis_and_charging();
     test_cli_parsers_and_json_escape();
     test_glyph_bbox_and_premul_blit();
     printf("All keychron core tests passed.\n");

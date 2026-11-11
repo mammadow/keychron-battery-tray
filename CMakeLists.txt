@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(keychron_battery VERSION 1.0.0 LANGUAGES C)
+project(keychron_battery VERSION 1.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -25,17 +25,29 @@ configure_file(
     @ONLY
 )
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/generated)
+set_source_files_properties(
+    assets/tray.rc
+    assets/cli.rc
+    PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/generated/version.h
+)
 
-set(KC_WARN_FLAGS -Wall -Wextra -Wpedantic -Werror)
-set(KC_OPT_FLAGS
-    $<$<CONFIG:Release>:-Os>
-    $<$<CONFIG:Release>:-ffunction-sections>
-    $<$<CONFIG:Release>:-fdata-sections>
-)
-set(KC_LINK_OPT_FLAGS
-    $<$<CONFIG:Release>:-Wl,--gc-sections>
-    $<$<CONFIG:Release>:-s>
-)
+if(MSVC)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    set(KC_WARN_FLAGS /W4 /WX /utf-8)
+    set(KC_OPT_FLAGS $<$<CONFIG:Release>:/O2>)
+    set(KC_LINK_OPT_FLAGS "")
+else()
+    set(KC_WARN_FLAGS -Wall -Wextra -Wpedantic -Werror)
+    set(KC_OPT_FLAGS
+        $<$<CONFIG:Release>:-Os>
+        $<$<CONFIG:Release>:-ffunction-sections>
+        $<$<CONFIG:Release>:-fdata-sections>
+    )
+    set(KC_LINK_OPT_FLAGS
+        $<$<CONFIG:Release>:-Wl,--gc-sections>
+        $<$<CONFIG:Release>:-s>
+    )
+endif()
 
 add_library(keychron_pure STATIC
     src/protocol.c
@@ -51,14 +63,18 @@ add_library(keychron_win STATIC
 )
 target_include_directories(keychron_win PUBLIC src)
 target_compile_options(keychron_win PRIVATE ${KC_WARN_FLAGS} ${KC_OPT_FLAGS})
-target_link_libraries(keychron_win PUBLIC keychron_pure hid setupapi gdi32 user32 advapi32)
+target_link_libraries(keychron_win PUBLIC keychron_pure hid setupapi bluetoothapis gdi32 user32 advapi32)
 
 add_executable(keychron-battery-tray WIN32
     src/tray_main.c
     assets/tray.rc
 )
 target_compile_options(keychron-battery-tray PRIVATE ${KC_WARN_FLAGS} ${KC_OPT_FLAGS})
-target_link_options(keychron-battery-tray PRIVATE -municode -mwindows ${KC_LINK_OPT_FLAGS})
+if(MSVC)
+    target_link_options(keychron-battery-tray PRIVATE /MANIFEST:NO /ENTRY:wWinMainCRTStartup)
+else()
+    target_link_options(keychron-battery-tray PRIVATE -municode -mwindows ${KC_LINK_OPT_FLAGS})
+endif()
 target_link_libraries(keychron-battery-tray PRIVATE keychron_win shell32 user32 gdi32 advapi32 hid)
 
 add_executable(keychron-battery
@@ -66,7 +82,11 @@ add_executable(keychron-battery
     assets/cli.rc
 )
 target_compile_options(keychron-battery PRIVATE ${KC_WARN_FLAGS} ${KC_OPT_FLAGS})
-target_link_options(keychron-battery PRIVATE -municode ${KC_LINK_OPT_FLAGS})
+if(MSVC)
+    target_link_options(keychron-battery PRIVATE /ENTRY:wmainCRTStartup)
+else()
+    target_link_options(keychron-battery PRIVATE -municode ${KC_LINK_OPT_FLAGS})
+endif()
 target_link_libraries(keychron-battery PRIVATE keychron_win hid setupapi)
 
 install(TARGETS keychron-battery-tray keychron-battery RUNTIME DESTINATION bin)

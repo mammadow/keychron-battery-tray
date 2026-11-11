@@ -5,10 +5,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define KC_ICON_CACHE_CAP 104U
+#define KC_ICON_CACHE_CAP 128U
 
 typedef struct kc_icon_entry {
     char key[8];
+    bool is_low;
     HICON hicon;
 } kc_icon_entry_t;
 
@@ -30,12 +31,13 @@ int kc_query_tray_icon_size(HWND hwnd);
 bool kc_is_taskbar_light(void);
 
 /**
- * Return a cached (or newly rendered) HICON for `text` at `(icon_size, light_taskbar)`.
+ * Return a cached (or newly rendered) HICON for `text` at `(icon_size, light_taskbar, is_low)`.
  * The returned HICON is owned by the cache and valid until cache clear/destroy.
  */
 HICON kc_icon_cache_get(kc_icon_cache_t *cache,
                         const char *text,
                         int icon_size,
-                        bool light_taskbar);
+                        bool light_taskbar,
+                        bool is_low);
 
 #endif /* KEYCHRON_ICON_RENDER_H */

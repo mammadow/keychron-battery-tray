@@ -9,30 +9,6 @@
 #define KC_RUN_SUBKEY      L"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
 #define KC_RUN_VALUE       L"KeychronBatteryTray"
 
-static uint32_t kc_clamp_poll_minutes(uint32_t minutes) {
-    switch (minutes) {
-        case 5U:
-        case 15U:
-        case 30U:
-        case 60U:
-            return minutes;
-        default:
-            return 30U;
-    }
-}
-
-static uint8_t kc_clamp_low_alert(uint32_t pct) {
-    switch (pct) {
-        case 0U:
-        case 10U:
-        case 15U:
-        case 20U:
-            return (uint8_t)pct;
-        default:
-            return (uint8_t)KEYCHRON_LOW_BATTERY_PCT;
-    }
-}
-
 static bool kc_reg_read_dword(const wchar_t *name, DWORD *out) {
     DWORD val = 0;
     DWORD sz = sizeof(val);
@@ -107,20 +83,20 @@ void kc_autostart_set(bool enable, uint16_t vid, uint16_t pid, int interface_num
     DWORD len = GetModuleFileNameW(NULL, exe_path, MAX_PATH);
     if (len > 0U && len < MAX_PATH) {
         wchar_t cmd[MAX_PATH + 80];
-        int pos = _snwprintf(cmd, sizeof(cmd) / sizeof(cmd[0]), L"\"%ls\"", exe_path);
-        if (pos > 0 && vid != KEYCHRON_VID) {
-            pos += _snwprintf(cmd + pos, (sizeof(cmd) / sizeof(cmd[0])) - (size_t)pos,
-                              L" --vid 0x%04x", vid);
+        size_t cap = sizeof(cmd) / sizeof(cmd[0]);
+        int pos = _snwprintf(cmd, cap, L"\"%ls\"", exe_path);
+        if (pos > 0 && (size_t)pos < cap && vid != KEYCHRON_VID) {
+            int n = _snwprintf(cmd + pos, cap - (size_t)pos, L" --vid 0x%04x", vid);
+            if (n > 0) pos += n;
         }
-        if (pos > 0 && pid != 0U) {
-            pos += _snwprintf(cmd + pos, (sizeof(cmd) / sizeof(cmd[0])) - (size_t)pos,
-                              L" --pid 0x%04x", pid);
+        if (pos > 0 && (size_t)pos < cap && pid != 0U) {
+            int n = _snwprintf(cmd + pos, cap - (size_t)pos, L" --pid 0x%04x", pid);
+            if (n > 0) pos += n;
         }
-        if (pos > 0 && interface_num >= 0) {
-            _snwprintf(cmd + pos, (sizeof(cmd) / sizeof(cmd[0])) - (size_t)pos,
-                       L" --interface %d", interface_num);
+        if (pos > 0 && (size_t)pos < cap && interface_num >= 0) {
+            _snwprintf(cmd + pos, cap - (size_t)pos, L" --interface %d", interface_num);
         }
-        cmd[(sizeof(cmd) / sizeof(cmd[0])) - 1] = L'\0';
+        cmd[cap - 1U] = L'\0';
         DWORD bytes = (DWORD)((wcslen(cmd) + 1U) * sizeof(wchar_t));
         RegSetValueExW(key, KC_RUN_VALUE, 0, REG_SZ, (const BYTE *)cmd, bytes);
     }

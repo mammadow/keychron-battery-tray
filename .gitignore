@@ -5,6 +5,7 @@ __pycache__/
 dist/
 build/
 build-debug/
+build-msvc/
 CMakeUserPresets.json
 
 .venv/
