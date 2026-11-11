@@ -23,15 +23,87 @@ static int kc_hex_val(wchar_t ch) {
     return -1;
 }
 
-size_t kc_build_status_report(uint8_t *buf, size_t buf_cap, uint16_t report_len) {
+static size_t kc_build_cmd_report(uint8_t *buf,
+                                  size_t buf_cap,
+                                  uint16_t report_len,
+                                  uint8_t report_id,
+                                  uint8_t cmd) {
     size_t target = (report_len >= 2U) ? (size_t)report_len : KEYCHRON_REPORT_SIZE;
     if (!buf || buf_cap < target || target < 2U) {
         return 0;
     }
     memset(buf, 0, target);
-    buf[0] = KEYCHRON_REPORT_ID_CMD;
-    buf[1] = KEYCHRON_CMD_STATUS;
+    buf[0] = report_id;
+    buf[1] = cmd;
     return target;
+}
+
+size_t kc_build_status_report(uint8_t *buf, size_t buf_cap, uint16_t report_len) {
+    return kc_build_cmd_report(buf, buf_cap, report_len,
+                               KEYCHRON_REPORT_ID_CMD, KEYCHRON_CMD_STATUS);
+}
+
+size_t kc_build_recv_state_report(uint8_t *buf, size_t buf_cap, uint16_t report_len) {
+    return kc_build_cmd_report(buf, buf_cap, report_len,
+                               KEYCHRON_REPORT_ID_INFO, KEYCHRON_CMD_RECV_STATE);
+}
+
+bool kc_parse_recv_state_response(const uint8_t *buf,
+                                  size_t len,
+                                  uint16_t *out_vid,
+                                  uint16_t *out_pid,
+                                  bool *out_connected) {
+    if (!buf || len < KEYCHRON_RECV_SLOTS_OFFSET + KEYCHRON_RECV_SLOT_STRIDE) {
+        return false;
+    }
+    if ((buf[0] != KEYCHRON_REPORT_ID_INFO && buf[0] != KEYCHRON_REPORT_ID_INFO_RESP) ||
+        buf[1] != KEYCHRON_CMD_RECV_STATE) {
+        return false;
+    }
+
+    bool have_any = false;
+    uint16_t first_vid = 0U;
+    uint16_t first_pid = 0U;
+
+    for (size_t slot = 0U; slot < KEYCHRON_RECV_MAX_SLOTS; ++slot) {
+        size_t off = KEYCHRON_RECV_SLOTS_OFFSET + slot * KEYCHRON_RECV_SLOT_STRIDE;
+        if (off + KEYCHRON_RECV_SLOT_STRIDE > len) {
+            break;
+        }
+        uint16_t svid = (uint16_t)((uint16_t)buf[off] | ((uint16_t)buf[off + 1U] << 8));
+        uint16_t spid = (uint16_t)((uint16_t)buf[off + 2U] | ((uint16_t)buf[off + 3U] << 8));
+        bool conn = (buf[off + 4U] != 0U);
+        if (svid == 0U || spid == 0U) {
+            continue;
+        }
+        if (!have_any) {
+            have_any = true;
+            first_vid = svid;
+            first_pid = spid;
+        }
+        if (conn) {
+            if (out_vid) *out_vid = svid;
+            if (out_pid) *out_pid = spid;
+            if (out_connected) *out_connected = true;
+            return true;
+        }
+    }
+
+    if (!have_any) {
+        return false;
+    }
+    if (out_vid) *out_vid = first_vid;
+    if (out_pid) *out_pid = first_pid;
+    if (out_connected) *out_connected = false;
+    return true;
+}
+
+const char *kc_model_name_for_pid(uint16_t pid) {
+    switch (pid) {
+        case 0xD048U: return "Keychron M5";
+        case 0xD049U: return "Keychron M6 8K";
+        default:      return NULL;
+    }
 }
 
 bool kc_parse_battery_status(const uint8_t *buf,

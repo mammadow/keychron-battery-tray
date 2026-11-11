@@ -45,6 +45,11 @@ typedef struct kc_hid_session {
     kc_hid_transport_t preferred_transport;
     kc_hid_device_info_t cached_info;
     bool has_info;
+    wchar_t cached_ble_path[MAX_PATH];
+    bool cached_ble_is_svc;
+    bool paired_probed;
+    uint16_t paired_vid;
+    uint16_t paired_pid;
 } kc_hid_session_t;
 
 void kc_hid_session_init(kc_hid_session_t *session);

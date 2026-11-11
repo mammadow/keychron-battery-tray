@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(keychron_battery VERSION 1.1.0 LANGUAGES C)
+project(keychron_battery VERSION 1.2.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -37,7 +37,7 @@ if(MSVC)
     set(KC_OPT_FLAGS $<$<CONFIG:Release>:/O2>)
     set(KC_LINK_OPT_FLAGS "")
 else()
-    set(KC_WARN_FLAGS -Wall -Wextra -Wpedantic -Werror)
+    set(KC_WARN_FLAGS -Wall -Wextra -Wpedantic -Wshadow -Wundef -Werror)
     set(KC_OPT_FLAGS
         $<$<CONFIG:Release>:-Os>
         $<$<CONFIG:Release>:-ffunction-sections>

@@ -6,19 +6,25 @@
 #include <stdint.h>
 #include <wchar.h>
 
-#define KEYCHRON_VID               0x3434U
-#define KEYCHRON_RECEIVER_PID      0xD028U
-#define KEYCHRON_REPORT_ID_CMD     0xB3U
-#define KEYCHRON_REPORT_ID_RESP    0xB4U
-#define KEYCHRON_CMD_STATUS        0x06U
-#define KEYCHRON_BATTERY_OFFSET    20U
-#define KEYCHRON_BATTERY_CHARGING  0x80U
-#define KEYCHRON_BATTERY_LEVEL     0x7FU
-#define KEYCHRON_REPORT_SIZE       64U
-#define KEYCHRON_MAX_REPORT_SIZE   256U
-#define KEYCHRON_VENDOR_USAGE_PAGE 0xFFC1U
-#define KEYCHRON_VIA_USAGE_PAGE    0xFF60U
-#define KEYCHRON_DEFAULT_INTERFACE 4
+#define KEYCHRON_VID                 0x3434U
+#define KEYCHRON_RECEIVER_PID        0xD028U
+#define KEYCHRON_REPORT_ID_CMD       0xB3U
+#define KEYCHRON_REPORT_ID_RESP      0xB4U
+#define KEYCHRON_REPORT_ID_INFO      0xB5U
+#define KEYCHRON_REPORT_ID_INFO_RESP 0xB6U
+#define KEYCHRON_CMD_RECV_STATE      0x03U
+#define KEYCHRON_CMD_STATUS          0x06U
+#define KEYCHRON_RECV_SLOTS_OFFSET   3U
+#define KEYCHRON_RECV_SLOT_STRIDE    5U
+#define KEYCHRON_RECV_MAX_SLOTS      3U
+#define KEYCHRON_BATTERY_OFFSET      20U
+#define KEYCHRON_BATTERY_CHARGING    0x80U
+#define KEYCHRON_BATTERY_LEVEL       0x7FU
+#define KEYCHRON_REPORT_SIZE         64U
+#define KEYCHRON_MAX_REPORT_SIZE     256U
+#define KEYCHRON_VENDOR_USAGE_PAGE   0xFFC1U
+#define KEYCHRON_VIA_USAGE_PAGE      0xFF60U
+#define KEYCHRON_DEFAULT_INTERFACE   4
 
 #define KEYCHRON_POLL_INTERVAL_MS  (30U * 60U * 1000U)
 #define KEYCHRON_LOW_BATTERY_PCT   15U
@@ -59,6 +65,29 @@ bool kc_parse_battery_status(const uint8_t *buf,
 
 /** Convenience wrapper extracting only percentage (0..100). */
 bool kc_parse_battery_response(const uint8_t *buf, size_t len, uint8_t *out_pct);
+
+/**
+ * Build a zero-padded Keychron receiver paired-device query report (0xB5 0x03).
+ * Returns report byte count written, or 0 if buf_cap is insufficient.
+ */
+size_t kc_build_recv_state_report(uint8_t *buf, size_t buf_cap, uint16_t report_len);
+
+/**
+ * Parse a Keychron receiver state response (0xB5/0xB6 0x03) for the paired mouse's
+ * VID/PID and active link status. Prefers a connected slot, falling back to the
+ * first non-zero paired slot if all slots are idle/asleep.
+ */
+bool kc_parse_recv_state_response(const uint8_t *buf,
+                                  size_t len,
+                                  uint16_t *out_vid,
+                                  uint16_t *out_pid,
+                                  bool *out_connected);
+
+/**
+ * Return a known Keychron marketing model name for a mouse USB PID,
+ * or NULL if the PID is not in the built-in verified lookup table.
+ */
+const char *kc_model_name_for_pid(uint16_t pid);
 
 /**
  * Extract USB composite interface number (e.g. "&MI_04" -> 4) from a Windows HID path.

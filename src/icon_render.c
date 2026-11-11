@@ -104,7 +104,7 @@ static HBITMAP kc_create_topdown_dib32(HDC dc, int width, int height, uint32_t *
 static HICON kc_render_tray_icon(const char *text,
                                  int icon_size,
                                  bool light_taskbar,
-                                 bool is_low) {
+                                 kc_icon_tone_t tone) {
     if (!text || icon_size <= 0) {
         return NULL;
     }
@@ -191,10 +191,14 @@ static HICON kc_render_tray_icon(const char *text,
     }
 
     uint8_t fg_r, fg_g, fg_b;
-    if (is_low) {
+    if (tone == KC_TONE_LOW) {
         fg_r = light_taskbar ? 205U : 255U;
         fg_g = light_taskbar ? 32U : 92U;
         fg_b = light_taskbar ? 32U : 92U;
+    } else if (tone == KC_TONE_CHARGING) {
+        fg_r = light_taskbar ? 16U : 108U;
+        fg_g = light_taskbar ? 124U : 203U;
+        fg_b = light_taskbar ? 16U : 95U;
     } else {
         uint8_t fg = light_taskbar ? 24U : 255U;
         fg_r = fg;
@@ -245,7 +249,7 @@ HICON kc_icon_cache_get(kc_icon_cache_t *cache,
                         const char *text,
                         int icon_size,
                         bool light_taskbar,
-                        bool is_low) {
+                        kc_icon_tone_t tone) {
     if (!cache || !text) {
         return NULL;
     }
@@ -256,13 +260,13 @@ HICON kc_icon_cache_get(kc_icon_cache_t *cache,
     }
 
     for (size_t i = 0; i < cache->count; ++i) {
-        if (cache->entries[i].is_low == is_low &&
+        if (cache->entries[i].tone == tone &&
             strncmp(cache->entries[i].key, text, sizeof(cache->entries[i].key) - 1) == 0) {
             return cache->entries[i].hicon;
         }
     }
 
-    HICON hicon = kc_render_tray_icon(text, icon_size, light_taskbar, is_low);
+    HICON hicon = kc_render_tray_icon(text, icon_size, light_taskbar, tone);
     if (!hicon) {
         return NULL;
     }
@@ -271,7 +275,7 @@ HICON kc_icon_cache_get(kc_icon_cache_t *cache,
         kc_icon_entry_t *slot = &cache->entries[cache->count++];
         strncpy(slot->key, text, sizeof(slot->key) - 1);
         slot->key[sizeof(slot->key) - 1] = '\0';
-        slot->is_low = is_low;
+        slot->tone = tone;
         slot->hicon = hicon;
     } else {
         if (cache->entries[0].hicon) {
@@ -279,7 +283,7 @@ HICON kc_icon_cache_get(kc_icon_cache_t *cache,
         }
         strncpy(cache->entries[0].key, text, sizeof(cache->entries[0].key) - 1);
         cache->entries[0].key[sizeof(cache->entries[0].key) - 1] = '\0';
-        cache->entries[0].is_low = is_low;
+        cache->entries[0].tone = tone;
         cache->entries[0].hicon = hicon;
     }
     return hicon;

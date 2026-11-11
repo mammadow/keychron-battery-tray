@@ -17,7 +17,8 @@
 typedef enum kc_fg_expect {
     KC_FG_WHITE = 0,
     KC_FG_DARK,
-    KC_FG_RED
+    KC_FG_RED,
+    KC_FG_GREEN
 } kc_fg_expect_t;
 
 static void verify_hicon_layout(HICON hicon,
@@ -71,6 +72,9 @@ static void verify_hicon_layout(HICON hicon,
                     KC_CHECK(r <= 24U);
                 } else if (fg == KC_FG_RED) {
                     KC_CHECK(r >= g);
+                } else if (fg == KC_FG_GREEN) {
+                    uint8_t b = (uint8_t)(px & 0xFFU);
+                    KC_CHECK(g >= r && g >= b);
                 } else {
                     KC_CHECK(r <= a);
                 }
@@ -98,36 +102,41 @@ int main(void) {
     kc_icon_cache_t cache;
     kc_icon_cache_init(&cache);
 
-    HICON h46 = kc_icon_cache_get(&cache, "46", 24, false, false);
+    HICON h46 = kc_icon_cache_get(&cache, "46", 24, false, KC_TONE_NORMAL);
     verify_hicon_layout(h46, 24, KC_FG_WHITE, 13, 13);
 
-    HICON h46_again = kc_icon_cache_get(&cache, "46", 24, false, false);
+    HICON h46_again = kc_icon_cache_get(&cache, "46", 24, false, KC_TONE_NORMAL);
     KC_CHECK(h46_again == h46);
 
-    /* Low-battery icon variant uses distinct HICON with red foreground. */
-    HICON h12_norm = kc_icon_cache_get(&cache, "12", 24, false, false);
-    HICON h12_low = kc_icon_cache_get(&cache, "12", 24, false, true);
-    KC_CHECK(h12_low != h12_norm);
+    /* Low-battery and charging icon variants use distinct HICONs with red/green foregrounds. */
+    HICON h12_norm = kc_icon_cache_get(&cache, "12", 24, false, KC_TONE_NORMAL);
+    HICON h12_low = kc_icon_cache_get(&cache, "12", 24, false, KC_TONE_LOW);
+    HICON h12_chg = kc_icon_cache_get(&cache, "12", 24, false, KC_TONE_CHARGING);
+    KC_CHECK(h12_low != h12_norm && h12_chg != h12_norm && h12_chg != h12_low);
     verify_hicon_layout(h12_low, 24, KC_FG_RED, 13, 13);
+    verify_hicon_layout(h12_chg, 24, KC_FG_GREEN, 13, 13);
 
-    HICON h100_24 = kc_icon_cache_get(&cache, "100", 24, false, false);
+    HICON h100_24 = kc_icon_cache_get(&cache, "100", 24, false, KC_TONE_NORMAL);
     verify_hicon_layout(h100_24, 24, KC_FG_WHITE, 11, 13);
 
-    HICON h100_16 = kc_icon_cache_get(&cache, "100", 16, false, false);
+    HICON h100_16 = kc_icon_cache_get(&cache, "100", 16, false, KC_TONE_NORMAL);
     verify_hicon_layout(h100_16, 16, KC_FG_WHITE, 7, 9);
 
-    HICON hdash = kc_icon_cache_get(&cache, "--", 16, false, false);
+    HICON hdash = kc_icon_cache_get(&cache, "--", 16, false, KC_TONE_NORMAL);
     verify_hicon_layout(hdash, 16, KC_FG_WHITE, 1, 3);
 
-    HICON herr = kc_icon_cache_get(&cache, "!", 16, false, false);
+    HICON herr = kc_icon_cache_get(&cache, "!", 16, false, KC_TONE_NORMAL);
     verify_hicon_layout(herr, 16, KC_FG_WHITE, 7, 9);
 
-    HICON h46_light = kc_icon_cache_get(&cache, "46", 24, true, false);
+    HICON h46_light = kc_icon_cache_get(&cache, "46", 24, true, KC_TONE_NORMAL);
     verify_hicon_layout(h46_light, 24, KC_FG_DARK, 13, 13);
     KC_CHECK(cache.count == 1U);
 
-    HICON h12_light_low = kc_icon_cache_get(&cache, "12", 24, true, true);
+    HICON h12_light_low = kc_icon_cache_get(&cache, "12", 24, true, KC_TONE_LOW);
     verify_hicon_layout(h12_light_low, 24, KC_FG_RED, 13, 13);
+
+    HICON h46_light_chg = kc_icon_cache_get(&cache, "46", 24, true, KC_TONE_CHARGING);
+    verify_hicon_layout(h46_light_chg, 24, KC_FG_GREEN, 13, 13);
 
     kc_icon_cache_destroy(&cache);
     KC_CHECK(cache.count == 0U);

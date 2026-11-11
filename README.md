@@ -12,12 +12,12 @@ Written in C17 against the Win32, Windows HID, and Windows BLE GATT SDKs (`hid.d
 
 - **Native Windows 11 typography**: renders `Segoe UI Variable Text` Regular at `0.75×` tray icon size (`12 DIPs`, falling back to `Segoe UI` on Windows 10) with hinted grayscale anti-aliasing and automatic width-fitting for `"100"` directly into an in-memory `CreateIconIndirect` `HICON` cache (no temp `.ico` files on disk).
 - **Low-battery visual & toast alerts**: highlights the tray number in red when battery drops to or below the threshold while discharging, and fires a one-time Quiet-Time-aware Windows warning notification with hysteresis.
-- **Charging detection & wired priority**: decodes Keychron's charging flag (`0x80`) in byte `20` (`charging` indicator in tray tooltip/menu and CLI `--json`), suppresses low-battery warnings while charging, and prefers a directly plugged-in wired mouse over the receiver dongle.
+- **Charging detection & wired priority**: decodes Keychron's charging flag (`0x80`) in byte `20` (green charging number in the tray icon, `charging` indicator in tray tooltip/menu and CLI `--json`), suppresses low-battery warnings while charging, queries paired mouse identity via `0xB5 0x03` behind the Ultra-Link 8K receiver, and prefers a directly plugged-in wired mouse over the receiver dongle.
 - **Per-Monitor V2 DPI & light/dark taskbar aware**: responds live to `WM_DPICHANGED`, `WM_DISPLAYCHANGE`, and `ImmersiveColorSet` (`SystemUsesLightTheme`).
 - **Event-driven & zero busy-wait**: blocks on Win32 messages and kernel event waits; supports left-click refresh, `WM_POWERBROADCAST` resume, `GUID_CONSOLE_DISPLAY_STATE` Modern Standby display wake (60s cooldown), `WM_DEVICECHANGE` HID hotplug, on-demand Raw Input mouse wake (arms only while the mouse is asleep/unreachable, filtering strictly to Keychron `VID_3434` so touchpads/other mice never trigger polls), and `TaskbarCreated` Explorer recovery.
-- **Instant quit & sleep resilience**: cancels pending `OVERLAPPED` HID I/O immediately on exit via `CancelIoEx`, holds last reading across brief wireless sleep misses, and backs off (`30s -> 60s -> 120s -> 300s`).
-- **Configurable tray menu**: shows detected device name, charging state, and timestamp; **Poll interval** (`5m` / `15m` / `30m` / `60m`), **Low-battery alert** (`Off` / `10%` / `15%` / `20%`), and **Run at Windows startup** (persisted under `HKCU\Software\KeychronBatteryTray` / `HKCU\...\Run`).
-- **Scriptable CLI (`keychron-battery.exe`)**: auto-detects the Keychron device by default and supports `--list`, `--raw`, `--json`, `--timeout`, `--vid`, `--pid`, `--interface`, `--debug`, and `--version`.
+- **Instant quit & sleep resilience**: cancels pending `OVERLAPPED` HID I/O immediately on exit via `CancelIoEx`, holds last reading across brief wireless sleep misses, caches both vendor HID and BLE GATT (`0x180F`) device paths, and backs off (`30s -> 60s -> 120s -> 300s`).
+- **Configurable tray menu**: shows detected device name, charging state, and timestamp; **Device** picker (`Auto-detect` or pinned Keychron PID/interface), **Poll interval** (`5m` / `15m` / `30m` / `60m`), **Low-battery alert** (`Off` / `10%` / `15%` / `20%`), and **Run at Windows startup** (persisted under `HKCU\Software\KeychronBatteryTray` / `HKCU\...\Run`).
+- **Scriptable CLI (`keychron-battery.exe`)**: auto-detects the Keychron device by default and supports `--list`, `--watch [sec]`, `--raw`, `--json`, `--timeout`, `--vid`, `--pid`, `--interface`, `--debug`, and `--version`.
 
 ## Layout
 
@@ -34,7 +34,11 @@ Written in C17 against the Win32, Windows HID, and Windows BLE GATT SDKs (`hid.d
 
 Grab the latest `keychron-battery-win64-v*.zip` from [GitHub Releases](https://github.com/mammadow/keychron-battery-tray/releases) (built automatically by CI with SHA-256 checksums), extract it, and run `keychron-battery-tray.exe`.
 
-You can also install locally via Scoop using the manifest in [`packaging/scoop/keychron-battery-tray.json`](packaging/scoop/keychron-battery-tray.json) (after setting the release zip's SHA-256).
+You can also install directly via [Scoop](https://scoop.sh) from the auto-generated release manifest (populated with each release's SHA-256):
+
+```powershell
+scoop install https://github.com/mammadow/keychron-battery-tray/releases/latest/download/keychron-battery-tray.json
+```
 
 ## Build & Test (MinGW-W64 or MSVC)
 
@@ -71,6 +75,7 @@ Run `.\build\keychron-battery-tray.exe` (or right-click the tray icon and enable
 
 ```powershell
 .\build\keychron-battery.exe             # auto-detect and print "Battery: 46%"
+.\build\keychron-battery.exe --watch 2   # poll every 2s cleanly until Ctrl+C
 .\build\keychron-battery.exe --raw       # print bare percentage integer (e.g. 46)
 .\build\keychron-battery.exe --json      # structured JSON for scripts
 .\build\keychron-battery.exe --list      # list detected Keychron HID interfaces

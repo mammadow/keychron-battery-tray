@@ -101,6 +101,11 @@ void kc_hid_session_invalidate(kc_hid_session_t *session) {
     session->preferred_transport = KC_XPORT_AUTO;
     session->has_info = false;
     memset(&session->cached_info, 0, sizeof(session->cached_info));
+    session->cached_ble_path[0] = L'\0';
+    session->cached_ble_is_svc = false;
+    session->paired_probed = false;
+    session->paired_vid = 0U;
+    session->paired_pid = 0U;
 }
 
 size_t kc_hid_list_devices(uint16_t filter_vid,
@@ -381,10 +386,69 @@ static bool kc_setup_prop_matches_keychron(HDEVINFO dev_info,
     return matched;
 }
 
+static bool kc_ble_read_device_path(const wchar_t *path,
+                                    bool is_svc_if,
+                                    uint8_t *out_pct) {
+    HANDLE h = CreateFileW(path,
+                           GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL,
+                           OPEN_EXISTING,
+                           0,
+                           NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    bool found = false;
+    if (is_svc_if) {
+        found = kc_ble_read_char_from_service(h, NULL, out_pct);
+    } else {
+        USHORT n_svcs = 0;
+        HRESULT hr = BluetoothGATTGetServices(
+            h, 0, NULL, &n_svcs, BLUETOOTH_GATT_FLAG_NONE);
+        if ((hr == S_OK || hr == HRESULT_FROM_WIN32(ERROR_MORE_DATA)) && n_svcs > 0U) {
+            PBTH_LE_GATT_SERVICE svcs = (PBTH_LE_GATT_SERVICE)calloc(
+                n_svcs, sizeof(BTH_LE_GATT_SERVICE));
+            if (svcs) {
+                USHORT actual_svcs = 0;
+                if (SUCCEEDED(BluetoothGATTGetServices(
+                        h, n_svcs, svcs, &actual_svcs, BLUETOOTH_GATT_FLAG_NONE))) {
+                    for (USHORT s = 0; s < actual_svcs; ++s) {
+                        if (kc_uuid_matches_short(&svcs[s].ServiceUuid,
+                                                  KC_BT_UUID_BATTERY_SERVICE) &&
+                            kc_ble_read_char_from_service(h, &svcs[s], out_pct)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                free(svcs);
+            }
+        }
+    }
+    CloseHandle(h);
+    return found;
+}
+
 static bool kc_try_ble_gatt_fallback(kc_hid_session_t *session,
                                      bool debug,
                                      FILE *debug_stream,
                                      uint8_t *out_pct) {
+    if (session && session->cached_ble_path[0] != L'\0') {
+        if (kc_ble_read_device_path(session->cached_ble_path,
+                                    session->cached_ble_is_svc, out_pct)) {
+            if (debug && debug_stream) {
+                fprintf(debug_stream, "[debug] BLE GATT Battery Service 0x180F (cached) -> %u%%\n",
+                        (unsigned)*out_pct);
+            }
+            return true;
+        }
+        session->cached_ble_path[0] = L'\0';
+        session->cached_ble_is_svc = false;
+        session->has_info = false;
+    }
+
     /* First try per-service GATT interface (Battery Service 0x180F), then device interface. */
     const GUID *guids[2] = {&KC_GUID_BTH_GATT_SVC, &KC_GUID_BTHLE_DEV};
     for (int g = 0; g < 2; ++g) {
@@ -424,52 +488,15 @@ static bool kc_try_ble_gatt_fallback(kc_hid_session_t *session,
                 continue;
             }
 
-            HANDLE h = CreateFileW(buf.detail.DevicePath,
-                                   GENERIC_READ,
-                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                   NULL,
-                                   OPEN_EXISTING,
-                                   0,
-                                   NULL);
-            if (h == INVALID_HANDLE_VALUE) {
-                continue;
-            }
-
-            bool found = false;
-            if (g == 0) {
-                found = kc_ble_read_char_from_service(h, NULL, out_pct);
-            } else {
-                USHORT n_svcs = 0;
-                HRESULT hr = BluetoothGATTGetServices(
-                    h, 0, NULL, &n_svcs, BLUETOOTH_GATT_FLAG_NONE);
-                if ((hr == S_OK || hr == HRESULT_FROM_WIN32(ERROR_MORE_DATA)) && n_svcs > 0U) {
-                    PBTH_LE_GATT_SERVICE svcs = (PBTH_LE_GATT_SERVICE)calloc(
-                        n_svcs, sizeof(BTH_LE_GATT_SERVICE));
-                    if (svcs) {
-                        USHORT actual_svcs = 0;
-                        if (SUCCEEDED(BluetoothGATTGetServices(
-                                h, n_svcs, svcs, &actual_svcs, BLUETOOTH_GATT_FLAG_NONE))) {
-                            for (USHORT s = 0; s < actual_svcs; ++s) {
-                                if (kc_uuid_matches_short(&svcs[s].ServiceUuid,
-                                                          KC_BT_UUID_BATTERY_SERVICE) &&
-                                    kc_ble_read_char_from_service(h, &svcs[s], out_pct)) {
-                                    found = true;
-                                    break;
-                                }
-                            }
-                        }
-                        free(svcs);
-                    }
-                }
-            }
-            CloseHandle(h);
-
-            if (found) {
+            if (kc_ble_read_device_path(buf.detail.DevicePath, (g == 0), out_pct)) {
                 if (debug && debug_stream) {
                     fprintf(debug_stream, "[debug] BLE GATT Battery Service 0x180F -> %u%%\n",
                             (unsigned)*out_pct);
                 }
                 if (session) {
+                    wcsncpy(session->cached_ble_path, buf.detail.DevicePath, MAX_PATH - 1);
+                    session->cached_ble_path[MAX_PATH - 1] = L'\0';
+                    session->cached_ble_is_svc = (g == 0);
                     memset(&session->cached_info, 0, sizeof(session->cached_info));
                     wcsncpy(session->cached_info.path, buf.detail.DevicePath, MAX_PATH - 1);
                     wcsncpy(session->cached_info.product,
@@ -617,6 +644,157 @@ static HANDLE kc_open_cached_or_discover(kc_hid_session_t *session,
     return h;
 }
 
+typedef size_t (*kc_report_builder_fn)(uint8_t *buf, size_t cap, uint16_t report_len);
+typedef bool (*kc_packet_parser_fn)(const uint8_t *buf, size_t len, void *ctx);
+
+typedef struct kc_battery_parse_ctx {
+    uint8_t pct;
+    bool charging;
+} kc_battery_parse_ctx_t;
+
+typedef struct kc_recv_parse_ctx {
+    uint16_t vid;
+    uint16_t pid;
+    bool connected;
+} kc_recv_parse_ctx_t;
+
+static bool kc_parse_battery_pkt(const uint8_t *buf, size_t len, void *ctx) {
+    kc_battery_parse_ctx_t *bctx = (kc_battery_parse_ctx_t *)ctx;
+    return kc_parse_battery_status(buf, len, &bctx->pct, &bctx->charging);
+}
+
+static bool kc_parse_recv_pkt(const uint8_t *buf, size_t len, void *ctx) {
+    kc_recv_parse_ctx_t *rctx = (kc_recv_parse_ctx_t *)ctx;
+    return kc_parse_recv_state_response(buf, len, &rctx->vid, &rctx->pid, &rctx->connected);
+}
+
+static kc_hid_status_t kc_hid_transact(HANDLE h,
+                                       uint16_t in_len,
+                                       uint16_t out_len,
+                                       uint16_t feat_len,
+                                       HANDLE io_event,
+                                       HANDLE cancel_event,
+                                       kc_report_builder_fn builder,
+                                       kc_packet_parser_fn parser,
+                                       void *parser_ctx,
+                                       kc_hid_transport_t *xport,
+                                       bool allow_feature_fallback,
+                                       uint32_t timeout_ms,
+                                       bool debug,
+                                       FILE *debug_stream) {
+    uint8_t out_buf[KC_HID_MAX_REPORT];
+    uint8_t in_buf[KC_HID_MAX_REPORT];
+
+    HidD_FlushQueue(h);
+
+    bool use_feature = (*xport == KC_XPORT_FEATURE) ||
+                       (*xport == KC_XPORT_AUTO && allow_feature_fallback);
+    bool sent_ok = false;
+
+    if (!use_feature) {
+        size_t plen = builder(out_buf, sizeof(out_buf), out_len);
+        bool cancelled = false;
+        sent_ok = kc_overlapped_write(h, out_buf, (DWORD)plen, io_event, cancel_event, &cancelled);
+        if (debug && debug_stream) {
+            fprintf(debug_stream, "[debug] WriteFile(%zu) -> %s\n", plen, sent_ok ? "ok" : "fail");
+        }
+        if (cancelled) {
+            return KC_HID_CANCELLED;
+        }
+        if (sent_ok && *xport == KC_XPORT_AUTO) {
+            *xport = KC_XPORT_WRITE;
+        }
+    }
+
+    if (!sent_ok) {
+        size_t flen = builder(out_buf, sizeof(out_buf), feat_len);
+        sent_ok = HidD_SetFeature(h, out_buf, (ULONG)flen) != FALSE;
+        if (debug && debug_stream) {
+            fprintf(debug_stream, "[debug] HidD_SetFeature(%zu) -> %s\n", flen, sent_ok ? "ok" : "fail");
+        }
+        if (sent_ok) {
+            *xport = KC_XPORT_FEATURE;
+        }
+    }
+
+    if (!sent_ok) {
+        return KC_HID_IO_ERROR;
+    }
+
+    ULONGLONG deadline = GetTickCount64() + timeout_ms;
+    while (!kc_is_cancelled(cancel_event)) {
+        ULONGLONG now = GetTickCount64();
+        if (now >= deadline) {
+            return KC_HID_TIMEOUT;
+        }
+        ULONGLONG rem = deadline - now;
+        DWORD slice = (rem > 250ULL) ? 250U : (DWORD)rem;
+        DWORD bytes_read = 0;
+
+        kc_read_wait_result_t rres = kc_overlapped_read(
+            h, in_buf, in_len, slice, io_event, cancel_event, &bytes_read);
+        if (rres == KC_READ_CANCELLED) {
+            return KC_HID_CANCELLED;
+        }
+        if (rres == KC_READ_ERROR) {
+            return KC_HID_IO_ERROR;
+        }
+        if (rres == KC_READ_TIMEOUT) {
+            continue;
+        }
+
+        if (debug && debug_stream) {
+            kc_debug_hex(debug_stream, "read", in_buf, bytes_read);
+        }
+        if (parser(in_buf, bytes_read, parser_ctx)) {
+            return KC_HID_OK;
+        }
+    }
+    return KC_HID_CANCELLED;
+}
+
+static void kc_probe_receiver_paired_model(kc_hid_session_t *session,
+                                           HANDLE h,
+                                           uint16_t in_len,
+                                           uint16_t out_len,
+                                           uint16_t feat_len,
+                                           HANDLE io_event,
+                                           HANDLE cancel_event,
+                                           bool debug,
+                                           FILE *debug_stream) {
+    if (!session || !session->has_info ||
+        session->cached_info.pid != KEYCHRON_RECEIVER_PID ||
+        session->paired_probed || kc_is_cancelled(cancel_event)) {
+        return;
+    }
+    session->paired_probed = true;
+
+    kc_hid_transport_t probe_xport = session->preferred_transport;
+    kc_recv_parse_ctx_t rctx;
+    memset(&rctx, 0, sizeof(rctx));
+
+    kc_hid_status_t st = kc_hid_transact(
+        h, in_len, out_len, feat_len, io_event, cancel_event,
+        kc_build_recv_state_report, kc_parse_recv_pkt, &rctx,
+        &probe_xport, false, 300U, debug, debug_stream);
+    if (st != KC_HID_OK || rctx.pid == 0U) {
+        return;
+    }
+
+    session->paired_vid = rctx.vid;
+    session->paired_pid = rctx.pid;
+    const char *model = (rctx.vid == KEYCHRON_VID) ? kc_model_name_for_pid(rctx.pid) : NULL;
+    if (model) {
+        MultiByteToWideChar(CP_UTF8, 0, model, -1, session->cached_info.product, 128);
+    } else if (rctx.vid == KEYCHRON_VID) {
+        _snwprintf(session->cached_info.product, 128, L"Keychron Mouse (0x%04X)", (unsigned)rctx.pid);
+    } else {
+        _snwprintf(session->cached_info.product, 128, L"Mouse (0x%04X:0x%04X)",
+                   (unsigned)rctx.vid, (unsigned)rctx.pid);
+    }
+    session->cached_info.product[127] = L'\0';
+}
+
 static kc_hid_status_t kc_query_handle(kc_hid_session_t *session,
                                        HANDLE h,
                                        uint32_t retries,
@@ -650,9 +828,6 @@ static kc_hid_status_t kc_query_handle(kc_hid_session_t *session,
     }
 
     kc_hid_status_t final_status = KC_HID_TIMEOUT;
-    uint8_t out_buf[KC_HID_MAX_REPORT];
-    uint8_t in_buf[KC_HID_MAX_REPORT];
-
     for (uint32_t attempt = 0; attempt < retries; ++attempt) {
         if (kc_is_cancelled(cancel_event)) {
             final_status = KC_HID_CANCELLED;
@@ -662,86 +837,25 @@ static kc_hid_status_t kc_query_handle(kc_hid_session_t *session,
             fprintf(debug_stream, "[debug] attempt %u/%u\n", attempt + 1U, retries);
         }
 
-        HidD_FlushQueue(h);
+        kc_battery_parse_ctx_t bctx;
+        memset(&bctx, 0, sizeof(bctx));
+        final_status = kc_hid_transact(
+            h, in_len, out_len, feat_len, io_event, cancel_event,
+            kc_build_status_report, kc_parse_battery_pkt, &bctx,
+            &session->preferred_transport, (attempt > 0U),
+            attempt_timeout_ms, debug, debug_stream);
 
-        bool use_feature = (session->preferred_transport == KC_XPORT_FEATURE) ||
-                           (session->preferred_transport == KC_XPORT_AUTO && attempt > 0U);
-        bool sent_ok = false;
-
-        if (!use_feature) {
-            size_t plen = kc_build_status_report(out_buf, sizeof(out_buf), out_len);
-            bool cancelled = false;
-            sent_ok = kc_overlapped_write(h, out_buf, (DWORD)plen, io_event, cancel_event, &cancelled);
-            if (debug && debug_stream) {
-                fprintf(debug_stream, "[debug] WriteFile(%zu) -> %s\n", plen, sent_ok ? "ok" : "fail");
+        if (final_status == KC_HID_OK) {
+            *out_pct = bctx.pct;
+            if (out_charging) {
+                *out_charging = bctx.charging;
             }
-            if (cancelled) {
-                final_status = KC_HID_CANCELLED;
-                break;
-            }
-            if (sent_ok && session->preferred_transport == KC_XPORT_AUTO) {
-                session->preferred_transport = KC_XPORT_WRITE;
-            }
-        }
-
-        if (!sent_ok) {
-            size_t flen = kc_build_status_report(out_buf, sizeof(out_buf), feat_len);
-            sent_ok = HidD_SetFeature(h, out_buf, (ULONG)flen) != FALSE;
-            if (debug && debug_stream) {
-                fprintf(debug_stream, "[debug] HidD_SetFeature(%zu) -> %s\n", flen, sent_ok ? "ok" : "fail");
-            }
-            if (sent_ok) {
-                session->preferred_transport = KC_XPORT_FEATURE;
-            }
-        }
-
-        if (!sent_ok) {
-            final_status = KC_HID_IO_ERROR;
+            kc_probe_receiver_paired_model(
+                session, h, in_len, out_len, feat_len, io_event,
+                cancel_event, debug, debug_stream);
             break;
         }
-
-        ULONGLONG deadline = GetTickCount64() + attempt_timeout_ms;
-        bool got_valid = false;
-        while (!kc_is_cancelled(cancel_event)) {
-            ULONGLONG now = GetTickCount64();
-            if (now >= deadline) {
-                break;
-            }
-            ULONGLONG rem = deadline - now;
-            DWORD slice = (rem > 250ULL) ? 250U : (DWORD)rem;
-            DWORD bytes_read = 0;
-
-            kc_read_wait_result_t rres = kc_overlapped_read(
-                h, in_buf, in_len, slice, io_event, cancel_event, &bytes_read);
-            if (rres == KC_READ_CANCELLED) {
-                final_status = KC_HID_CANCELLED;
-                goto done;
-            }
-            if (rres == KC_READ_ERROR) {
-                final_status = KC_HID_IO_ERROR;
-                goto done;
-            }
-            if (rres == KC_READ_TIMEOUT) {
-                continue;
-            }
-
-            if (debug && debug_stream) {
-                kc_debug_hex(debug_stream, "read", in_buf, bytes_read);
-            }
-            uint8_t pct = 0;
-            bool chg = false;
-            if (kc_parse_battery_status(in_buf, bytes_read, &pct, &chg)) {
-                *out_pct = pct;
-                if (out_charging) {
-                    *out_charging = chg;
-                }
-                final_status = KC_HID_OK;
-                got_valid = true;
-                break;
-            }
-        }
-
-        if (got_valid) {
+        if (final_status == KC_HID_CANCELLED || final_status == KC_HID_IO_ERROR) {
             break;
         }
 
@@ -761,7 +875,6 @@ static kc_hid_status_t kc_query_handle(kc_hid_session_t *session,
         }
     }
 
-done:
     CloseHandle(io_event);
     return final_status;
 }

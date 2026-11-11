@@ -241,8 +241,70 @@ static void test_glyph_bbox_and_premul_blit(void) {
     KC_CHECK(dst[2 * 4 + 2] == 0U);
 }
 
+static void test_recv_state_and_model_lookup(void) {
+    uint8_t cmd[64];
+    size_t n = kc_build_recv_state_report(cmd, sizeof(cmd), 64U);
+    KC_CHECK(n == 64U);
+    KC_CHECK(cmd[0] == KEYCHRON_REPORT_ID_INFO);
+    KC_CHECK(cmd[1] == KEYCHRON_CMD_RECV_STATE);
+    for (size_t i = 2; i < 64U; ++i) {
+        KC_CHECK(cmd[i] == 0U);
+    }
+
+    /* Captured response from Ultra-Link 8K: b6 03 01 34 34 56 d0 01 ... */
+    uint8_t resp[64] = {0};
+    resp[0] = KEYCHRON_REPORT_ID_INFO_RESP;
+    resp[1] = KEYCHRON_CMD_RECV_STATE;
+    resp[2] = 0x01U;
+    resp[3] = 0x34U;
+    resp[4] = 0x34U;
+    resp[5] = 0x56U;
+    resp[6] = 0xD0U;
+    resp[7] = 0x01U;
+
+    uint16_t vid = 0U, pid = 0U;
+    bool connected = false;
+    KC_CHECK(kc_parse_recv_state_response(resp, sizeof(resp), &vid, &pid, &connected));
+    KC_CHECK(vid == 0x3434U && pid == 0xD056U && connected);
+
+    /* Prefer connected slot 1 over idle slot 0; handle 0xB5 response header too. */
+    resp[0] = KEYCHRON_REPORT_ID_INFO;
+    resp[7] = 0x00U;
+    resp[8] = 0x34U;
+    resp[9] = 0x34U;
+    resp[10] = 0x49U;
+    resp[11] = 0xD0U;
+    resp[12] = 0x01U;
+    KC_CHECK(kc_parse_recv_state_response(resp, sizeof(resp), &vid, &pid, &connected));
+    KC_CHECK(vid == 0x3434U && pid == 0xD049U && connected);
+
+    /* Paired-but-asleep slot 0 still resolves VID/PID with connected=false. */
+    memset(resp + 8, 0, 5);
+    resp[5] = 0x48U;
+    resp[6] = 0xD0U;
+    KC_CHECK(kc_parse_recv_state_response(resp, sizeof(resp), &vid, &pid, &connected));
+    KC_CHECK(vid == 0x3434U && pid == 0xD048U && !connected);
+
+    /* Reject empty slots, wrong cmd/header, or truncated packets. */
+    memset(resp + 3, 0, 5);
+    KC_CHECK(!kc_parse_recv_state_response(resp, sizeof(resp), &vid, &pid, &connected));
+    resp[3] = 0x34U;
+    resp[4] = 0x34U;
+    resp[5] = 0x56U;
+    resp[6] = 0xD0U;
+    resp[1] = 0x06U;
+    KC_CHECK(!kc_parse_recv_state_response(resp, sizeof(resp), &vid, &pid, &connected));
+    resp[1] = KEYCHRON_CMD_RECV_STATE;
+    KC_CHECK(!kc_parse_recv_state_response(resp, 7U, &vid, &pid, &connected));
+
+    KC_CHECK(strcmp(kc_model_name_for_pid(0xD048U), "Keychron M5") == 0);
+    KC_CHECK(strcmp(kc_model_name_for_pid(0xD049U), "Keychron M6 8K") == 0);
+    KC_CHECK(kc_model_name_for_pid(0xD056U) == NULL);
+}
+
 int main(void) {
     test_build_and_parse_report();
+    test_recv_state_and_model_lookup();
     test_path_helpers();
     test_score_candidate_ranking();
     test_backoff_and_clamps();

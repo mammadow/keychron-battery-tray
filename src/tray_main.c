@@ -43,6 +43,9 @@
 #define IDM_ALERT_15          1203U
 #define IDM_ALERT_20          1204U
 
+#define IDM_DEV_AUTO          1300U
+#define KC_MENU_DEV_MAX       16U
+
 #define KC_DISPLAY_WAKE_COOLDOWN_MS 60000ULL
 
 /* GUID_CONSOLE_DISPLAY_STATE from winnt.h without requiring <initguid.h>. */
@@ -80,6 +83,8 @@ typedef struct kc_tray_app {
 
     bool tray_added;
     bool refresh_in_flight;
+    bool pending_refresh;
+    bool cli_target_override;
     kc_hid_status_t last_status;
     SYSTEMTIME last_reading_time;
     bool has_reading_time;
@@ -90,7 +95,7 @@ typedef struct kc_tray_app {
     HICON last_hicon;
     int icon_size;
     bool light_taskbar;
-    bool last_is_low;
+    kc_icon_tone_t last_tone;
 
     bool raw_watch_armed;
     kc_raw_dev_entry_t raw_cache[KC_RAW_CACHE_CAP];
@@ -99,11 +104,9 @@ typedef struct kc_tray_app {
 
 static kc_tray_app_t g_app;
 
-static void kc_parse_tray_args(kc_tray_app_t *app) {
-    app->target_vid = KEYCHRON_VID;
-    app->target_pid = 0U;
-    app->target_interface = -1;
+static void kc_set_raw_mouse_watch(kc_tray_app_t *app, bool enable);
 
+static void kc_parse_tray_args(kc_tray_app_t *app) {
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv) {
@@ -115,16 +118,19 @@ static void kc_parse_tray_args(kc_tray_app_t *app) {
             uint16_t v = 0U;
             if (kc_parse_u16_w(argv[++i], &v)) {
                 app->target_vid = v;
+                app->cli_target_override = true;
             }
         } else if (wcscmp(argv[i], L"--pid") == 0 && i + 1 < argc) {
             uint16_t p = 0U;
             if (kc_parse_u16_w(argv[++i], &p)) {
                 app->target_pid = p;
+                app->cli_target_override = true;
             }
         } else if (wcscmp(argv[i], L"--interface") == 0 && i + 1 < argc) {
             int iface = -1;
             if (kc_parse_int_range_w(argv[++i], 0, 255, &iface)) {
                 app->target_interface = iface;
+                app->cli_target_override = true;
             }
         }
     }
@@ -141,9 +147,9 @@ static const wchar_t *kc_device_label(const kc_tray_app_t *app) {
 static void kc_build_display_state(kc_tray_app_t *app,
                                    char out_glyph[8],
                                    wchar_t out_tip[128],
-                                   bool *out_is_low,
+                                   kc_icon_tone_t *out_tone,
                                    bool *out_low_alert) {
-    *out_is_low = false;
+    *out_tone = KC_TONE_NORMAL;
     *out_low_alert = false;
     const wchar_t *name = kc_device_label(app);
 
@@ -153,9 +159,12 @@ static void kc_build_display_state(kc_tray_app_t *app,
             strncpy(out_glyph, "!", 8);
         } else {
             snprintf(out_glyph, 8, "%u", (unsigned)app->poll_state.last_pct);
-            *out_is_low = (!app->poll_state.last_charging &&
-                           app->settings.low_alert_pct > 0U &&
-                           app->poll_state.last_pct <= app->settings.low_alert_pct);
+            if (app->poll_state.last_charging) {
+                *out_tone = KC_TONE_CHARGING;
+            } else if (app->settings.low_alert_pct > 0U &&
+                       app->poll_state.last_pct <= app->settings.low_alert_pct) {
+                *out_tone = KC_TONE_LOW;
+            }
         }
 
         if (app->poll_state.consecutive_failures == 0U) {
@@ -200,13 +209,13 @@ static void kc_build_display_state(kc_tray_app_t *app,
 static void kc_sync_tray_icon(kc_tray_app_t *app, bool force_add) {
     char glyph[8];
     wchar_t tip[128];
-    bool is_low = false;
+    kc_icon_tone_t tone = KC_TONE_NORMAL;
     bool low_alert = false;
 
-    kc_build_display_state(app, glyph, tip, &is_low, &low_alert);
+    kc_build_display_state(app, glyph, tip, &tone, &low_alert);
 
     HICON hicon = kc_icon_cache_get(
-        &app->icon_cache, glyph, app->icon_size, app->light_taskbar, is_low);
+        &app->icon_cache, glyph, app->icon_size, app->light_taskbar, tone);
     if (!hicon) {
         if (low_alert) {
             app->poll_state.low_battery_notified = false;
@@ -215,7 +224,7 @@ static void kc_sync_tray_icon(kc_tray_app_t *app, bool force_add) {
     }
 
     bool icon_changed = (hicon != app->last_hicon) ||
-                        (is_low != app->last_is_low) ||
+                        (tone != app->last_tone) ||
                         (strcmp(glyph, app->last_glyph) != 0);
     bool tip_changed = (wcscmp(tip, app->last_tip) != 0);
 
@@ -270,7 +279,7 @@ static void kc_sync_tray_icon(kc_tray_app_t *app, bool force_add) {
     }
 
     app->last_hicon = hicon;
-    app->last_is_low = is_low;
+    app->last_tone = tone;
     strncpy(app->last_glyph, glyph, sizeof(app->last_glyph) - 1);
     app->last_glyph[sizeof(app->last_glyph) - 1] = '\0';
     wcsncpy(app->last_tip, tip, 127);
@@ -283,12 +292,12 @@ static void kc_request_refresh(kc_tray_app_t *app, bool reset_cache) {
         kc_hid_session_invalidate(&app->hid_session);
         app->session_epoch++;
     }
-    bool already_running = app->refresh_in_flight;
-    LeaveCriticalSection(&app->state_lock);
-
-    if (!already_running || reset_cache) {
+    if (app->refresh_in_flight) {
+        app->pending_refresh = true;
+    } else {
         SetEvent(app->wake_event);
     }
+    LeaveCriticalSection(&app->state_lock);
 }
 
 static DWORD WINAPI kc_worker_proc(LPVOID param) {
@@ -296,10 +305,10 @@ static DWORD WINAPI kc_worker_proc(LPVOID param) {
     HANDLE waits[2] = {app->stop_event, app->wake_event};
 
     while (WaitForSingleObject(app->stop_event, 0) != WAIT_OBJECT_0) {
-        ResetEvent(app->wake_event);
-
         EnterCriticalSection(&app->state_lock);
+        ResetEvent(app->wake_event);
         app->refresh_in_flight = true;
+        app->pending_refresh = false;
         uint32_t start_epoch = app->session_epoch;
         kc_hid_session_t local_session = app->hid_session;
         uint16_t vid = app->target_vid;
@@ -332,17 +341,27 @@ static DWORD WINAPI kc_worker_proc(LPVOID param) {
             kc_hid_session_invalidate(&app->hid_session);
         }
         app->refresh_in_flight = false;
-        if (st == KC_HID_OK) {
-            kc_poll_state_record_success(&app->poll_state, pct, charging, GetTickCount64());
-        } else {
-            kc_poll_state_record_failure(&app->poll_state);
+        bool rerun_now = app->pending_refresh;
+        app->pending_refresh = false;
+        bool epoch_match = (app->session_epoch == start_epoch);
+        if (epoch_match) {
+            if (st == KC_HID_OK) {
+                kc_poll_state_record_success(&app->poll_state, pct, charging, GetTickCount64());
+            } else {
+                kc_poll_state_record_failure(&app->poll_state);
+            }
         }
         uint32_t normal_ms = app->settings.poll_minutes * 60U * 1000U;
         uint32_t wait_ms = kc_next_wait_ms_for(&app->poll_state, normal_ms);
         LeaveCriticalSection(&app->state_lock);
 
-        PostMessageW(app->hwnd, WM_APP_POLL_RESULT, (WPARAM)st, (LPARAM)pct);
+        if (epoch_match) {
+            PostMessageW(app->hwnd, WM_APP_POLL_RESULT, (WPARAM)st, (LPARAM)pct);
+        }
 
+        if (rerun_now) {
+            continue;
+        }
         DWORD wres = WaitForMultipleObjects(2, waits, FALSE, wait_ms);
         if (wres == WAIT_OBJECT_0) {
             break;
@@ -369,16 +388,141 @@ static UINT kc_alert_menu_id(uint8_t low_pct) {
     }
 }
 
+typedef struct kc_menu_dev_entry {
+    uint16_t pid;
+    int interface_number;
+} kc_menu_dev_entry_t;
+
+static void kc_populate_device_submenu(kc_tray_app_t *app,
+                                       HMENU dev_sub,
+                                       kc_menu_dev_entry_t out_devs[KC_MENU_DEV_MAX],
+                                       size_t *out_count) {
+    *out_count = 0U;
+
+    EnterCriticalSection(&app->state_lock);
+    uint16_t vid = app->target_vid;
+    uint16_t cur_pid = app->target_pid;
+    int cur_iface = app->target_interface;
+    bool cli_override = app->cli_target_override;
+    bool has_cached = app->hid_session.has_info;
+    uint16_t cached_pid = app->hid_session.cached_info.pid;
+    int cached_iface = app->hid_session.cached_info.interface_number;
+    wchar_t cached_name[128];
+    wcsncpy(cached_name, app->device_product, 127);
+    cached_name[127] = L'\0';
+    LeaveCriticalSection(&app->state_lock);
+
+    AppendMenuW(dev_sub, MF_STRING, IDM_DEV_AUTO, L"Auto-detect");
+
+    kc_hid_device_info_t list[32];
+    size_t found = kc_hid_list_devices(vid, list, sizeof(list) / sizeof(list[0]));
+    size_t limit = found < (sizeof(list) / sizeof(list[0])) ? found : (sizeof(list) / sizeof(list[0]));
+
+    UINT checked_id = IDM_DEV_AUTO;
+    bool matched_cur = (cur_pid == 0U && cur_iface < 0);
+
+    for (size_t i = 0; i < limit && *out_count < KC_MENU_DEV_MAX; ++i) {
+        kc_hid_candidate_t cand = {
+            .vid = list[i].vid,
+            .pid = list[i].pid,
+            .usage_page = list[i].usage_page,
+            .usage = list[i].usage,
+            .interface_number = list[i].interface_number,
+        };
+        if (kc_score_candidate(&cand, vid, 0U, -1) < 0) {
+            continue;
+        }
+
+        bool dup = false;
+        for (size_t j = 0; j < *out_count; ++j) {
+            if (out_devs[j].pid == list[i].pid &&
+                out_devs[j].interface_number == list[i].interface_number) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) {
+            continue;
+        }
+
+        const wchar_t *base_name = (list[i].product[0] != L'\0' && wcscmp(list[i].product, L"?") != 0)
+            ? list[i].product
+            : L"Keychron HID";
+        if (has_cached && cached_name[0] != L'\0' &&
+            list[i].pid == cached_pid && list[i].interface_number == cached_iface) {
+            base_name = cached_name;
+        }
+
+        wchar_t label[160];
+        if (list[i].interface_number >= 0) {
+            _snwprintf(label, 160, L"%ls (0x%04X, MI_%02d)",
+                       base_name, (unsigned)list[i].pid, list[i].interface_number);
+        } else {
+            _snwprintf(label, 160, L"%ls (0x%04X)", base_name, (unsigned)list[i].pid);
+        }
+        label[159] = L'\0';
+
+        UINT item_id = IDM_DEV_AUTO + 1U + (UINT)(*out_count);
+        out_devs[*out_count].pid = list[i].pid;
+        out_devs[*out_count].interface_number = list[i].interface_number;
+        (*out_count)++;
+        AppendMenuW(dev_sub, MF_STRING, item_id, label);
+
+        if ((cur_pid == 0U || list[i].pid == cur_pid) &&
+            (cur_iface < 0 || list[i].interface_number == cur_iface) &&
+            (cur_pid != 0U || cur_iface >= 0) &&
+            !matched_cur) {
+            checked_id = item_id;
+            matched_cur = true;
+        }
+    }
+
+    if (!matched_cur && (cur_pid != 0U || cur_iface >= 0) && *out_count < KC_MENU_DEV_MAX) {
+        wchar_t offline_label[160];
+        if (cur_pid != 0U && cur_iface >= 0) {
+            _snwprintf(offline_label, 160, L"Saved device (0x%04X, MI_%02d) [offline]",
+                       (unsigned)cur_pid, cur_iface);
+        } else if (cur_pid != 0U) {
+            _snwprintf(offline_label, 160, L"Saved device (0x%04X) [offline]", (unsigned)cur_pid);
+        } else {
+            _snwprintf(offline_label, 160, L"Saved interface MI_%02d [offline]", cur_iface);
+        }
+        offline_label[159] = L'\0';
+        UINT item_id = IDM_DEV_AUTO + 1U + (UINT)(*out_count);
+        out_devs[*out_count].pid = cur_pid;
+        out_devs[*out_count].interface_number = cur_iface;
+        (*out_count)++;
+        AppendMenuW(dev_sub, MF_STRING, item_id, offline_label);
+        checked_id = item_id;
+    }
+
+    CheckMenuRadioItem(dev_sub, IDM_DEV_AUTO, IDM_DEV_AUTO + (UINT)(*out_count), checked_id, MF_BYCOMMAND);
+
+    if (cli_override) {
+        for (UINT id = IDM_DEV_AUTO; id <= IDM_DEV_AUTO + (UINT)(*out_count); ++id) {
+            EnableMenuItem(dev_sub, id, MF_BYCOMMAND | MF_GRAYED);
+        }
+        AppendMenuW(dev_sub, MF_SEPARATOR, 0, NULL);
+        AppendMenuW(dev_sub, MF_STRING | MF_GRAYED, 0, L"Overridden by CLI arguments");
+    }
+}
+
 static void kc_show_context_menu(kc_tray_app_t *app) {
     HMENU menu = CreatePopupMenu();
+    HMENU dev_sub = CreatePopupMenu();
     HMENU poll_sub = CreatePopupMenu();
     HMENU alert_sub = CreatePopupMenu();
-    if (!menu || !poll_sub || !alert_sub) {
+    if (!menu || !dev_sub || !poll_sub || !alert_sub) {
+        if (dev_sub) DestroyMenu(dev_sub);
         if (poll_sub) DestroyMenu(poll_sub);
         if (alert_sub) DestroyMenu(alert_sub);
         if (menu) DestroyMenu(menu);
         return;
     }
+
+    kc_menu_dev_entry_t devs[KC_MENU_DEV_MAX];
+    size_t dev_count = 0U;
+    kc_populate_device_submenu(app, dev_sub, devs, &dev_count);
 
     wchar_t status_line[128];
     uint32_t poll_minutes = 30U;
@@ -401,8 +545,10 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
         _snwprintf(status_line, 128,
                    app->poll_state.last_charging ? L"%ls: %u%% (charging)" : L"%ls: %u%%",
                    name, (unsigned)app->poll_state.last_pct);
-    } else {
+    } else if (app->poll_state.consecutive_failures > 0U) {
         _snwprintf(status_line, 128, L"%ls: %ls", name, kc_hid_status_text_w(app->last_status));
+    } else {
+        _snwprintf(status_line, 128, L"%ls: checking...", name);
     }
     status_line[127] = L'\0';
     LeaveCriticalSection(&app->state_lock);
@@ -421,6 +567,7 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
 
     AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_STATUS, status_line);
     AppendMenuW(menu, MF_STRING, IDM_REFRESH, L"Refresh now");
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)dev_sub, L"Device");
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)poll_sub, L"Poll interval");
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)alert_sub, L"Low-battery alert");
     AppendMenuW(menu,
@@ -443,6 +590,36 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
         NULL);
     PostMessageW(app->hwnd, WM_NULL, 0, 0);
     DestroyMenu(menu);
+
+    if (cmd >= IDM_DEV_AUTO && cmd <= IDM_DEV_AUTO + (UINT)dev_count) {
+        if (!app->cli_target_override) {
+            uint16_t new_pid = 0U;
+            int new_iface = -1;
+            if (cmd > IDM_DEV_AUTO) {
+                size_t idx = (size_t)(cmd - IDM_DEV_AUTO - 1U);
+                new_pid = devs[idx].pid;
+                new_iface = devs[idx].interface_number;
+            }
+            EnterCriticalSection(&app->state_lock);
+            app->target_pid = new_pid;
+            app->target_interface = new_iface;
+            app->settings.target_pid = new_pid;
+            app->settings.target_interface = (int32_t)new_iface;
+            kc_settings_save(&app->settings);
+            app->device_product[0] = L'\0';
+            app->has_reading_time = false;
+            kc_poll_state_init(&app->poll_state);
+            app->raw_cache_count = 0U;
+            kc_sync_tray_icon(app, false);
+            LeaveCriticalSection(&app->state_lock);
+            kc_set_raw_mouse_watch(app, false);
+            if (kc_autostart_is_enabled()) {
+                kc_autostart_set(true, app->target_vid, app->target_pid, app->target_interface);
+            }
+            kc_request_refresh(app, true);
+        }
+        return;
+    }
 
     switch (cmd) {
         case IDM_REFRESH:
@@ -699,8 +876,11 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE hprev, PWSTR cmdline, int show) {
 
     memset(&g_app, 0, sizeof(g_app));
     g_app.hinst = hinst;
-    kc_parse_tray_args(&g_app);
     kc_settings_load(&g_app.settings);
+    g_app.target_vid = KEYCHRON_VID;
+    g_app.target_pid = g_app.settings.target_pid;
+    g_app.target_interface = (int)g_app.settings.target_interface;
+    kc_parse_tray_args(&g_app);
 
     g_app.mutex = CreateMutexW(NULL, FALSE, L"Local\\KeychronBatteryTrayMutex");
     if (!g_app.mutex) {

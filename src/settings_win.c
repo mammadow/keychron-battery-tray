@@ -26,6 +26,8 @@ void kc_settings_load(kc_tray_settings_t *out) {
     }
     out->poll_minutes = 30U;
     out->low_alert_pct = (uint8_t)KEYCHRON_LOW_BATTERY_PCT;
+    out->target_pid = 0U;
+    out->target_interface = -1;
 
     DWORD val = 0;
     if (kc_reg_read_dword(L"PollMinutes", &val)) {
@@ -33,6 +35,13 @@ void kc_settings_load(kc_tray_settings_t *out) {
     }
     if (kc_reg_read_dword(L"LowAlertPct", &val)) {
         out->low_alert_pct = kc_clamp_low_alert(val);
+    }
+    if (kc_reg_read_dword(L"TargetPid", &val) && val <= 0xFFFFUL) {
+        out->target_pid = (uint16_t)val;
+    }
+    if (kc_reg_read_dword(L"TargetInterface", &val)) {
+        int32_t iface = (int32_t)val;
+        out->target_interface = (iface >= 0 && iface <= 255) ? iface : -1;
     }
 }
 
@@ -47,8 +56,14 @@ void kc_settings_save(const kc_tray_settings_t *s) {
     }
     DWORD poll_m = kc_clamp_poll_minutes(s->poll_minutes);
     DWORD low_p = kc_clamp_low_alert(s->low_alert_pct);
+    DWORD tpid = (DWORD)s->target_pid;
+    DWORD tiface = (s->target_interface >= 0 && s->target_interface <= 255)
+        ? (DWORD)s->target_interface
+        : 0xFFFFFFFFUL;
     RegSetValueExW(key, L"PollMinutes", 0, REG_DWORD, (const BYTE *)&poll_m, sizeof(poll_m));
     RegSetValueExW(key, L"LowAlertPct", 0, REG_DWORD, (const BYTE *)&low_p, sizeof(low_p));
+    RegSetValueExW(key, L"TargetPid", 0, REG_DWORD, (const BYTE *)&tpid, sizeof(tpid));
+    RegSetValueExW(key, L"TargetInterface", 0, REG_DWORD, (const BYTE *)&tiface, sizeof(tiface));
     RegCloseKey(key);
 }
 
