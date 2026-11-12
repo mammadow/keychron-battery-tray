@@ -114,6 +114,7 @@ void kc_hid_session_invalidate(kc_hid_session_t *session) {
     session->cached_pid = 0U;
     session->cached_interface = -1;
     session->preferred_transport = KC_XPORT_AUTO;
+    session->transport_verified = false;
     session->has_info = false;
     memset(&session->cached_info, 0, sizeof(session->cached_info));
     session->active_link = KC_LINK_UNKNOWN;
@@ -808,6 +809,25 @@ static bool kc_parse_recv_pkt(const uint8_t *buf, size_t len, void *ctx) {
     return kc_parse_recv_state_response(buf, len, &rctx->vid, &rctx->pid, &rctx->connected);
 }
 
+static bool kc_try_write_report(HANDLE h,
+                                uint16_t out_len,
+                                HANDLE io_event,
+                                HANDLE cancel_event,
+                                kc_report_builder_fn builder,
+                                uint8_t *out_buf,
+                                size_t out_cap,
+                                bool debug,
+                                FILE *debug_stream,
+                                bool *out_cancelled) {
+    *out_cancelled = false;
+    size_t plen = builder(out_buf, out_cap, out_len);
+    bool ok = kc_overlapped_write(h, out_buf, (DWORD)plen, io_event, cancel_event, out_cancelled);
+    if (debug && debug_stream) {
+        fprintf(debug_stream, "[debug] WriteFile(%zu) -> %s\n", plen, ok ? "ok" : "fail");
+    }
+    return ok;
+}
+
 static kc_hid_status_t kc_hid_transact(HANDLE h,
                                        uint16_t in_len,
                                        uint16_t out_len,
@@ -827,17 +847,15 @@ static kc_hid_status_t kc_hid_transact(HANDLE h,
 
     HidD_FlushQueue(h);
 
-    bool use_feature = (*xport == KC_XPORT_FEATURE) ||
-                       (*xport == KC_XPORT_AUTO && allow_feature_fallback);
+    bool try_feature_first = (*xport == KC_XPORT_FEATURE) ||
+                             (*xport == KC_XPORT_AUTO && allow_feature_fallback);
     bool sent_ok = false;
 
-    if (!use_feature) {
-        size_t plen = builder(out_buf, sizeof(out_buf), out_len);
+    if (!try_feature_first) {
         bool cancelled = false;
-        sent_ok = kc_overlapped_write(h, out_buf, (DWORD)plen, io_event, cancel_event, &cancelled);
-        if (debug && debug_stream) {
-            fprintf(debug_stream, "[debug] WriteFile(%zu) -> %s\n", plen, sent_ok ? "ok" : "fail");
-        }
+        sent_ok = kc_try_write_report(
+            h, out_len, io_event, cancel_event, builder,
+            out_buf, sizeof(out_buf), debug, debug_stream, &cancelled);
         if (cancelled) {
             return KC_HID_CANCELLED;
         }
@@ -846,7 +864,7 @@ static kc_hid_status_t kc_hid_transact(HANDLE h,
         }
     }
 
-    if (!sent_ok) {
+    if (!sent_ok && *xport != KC_XPORT_WRITE) {
         size_t flen = builder(out_buf, sizeof(out_buf), feat_len);
         sent_ok = HidD_SetFeature(h, out_buf, (ULONG)flen) != FALSE;
         if (debug && debug_stream) {
@@ -854,6 +872,17 @@ static kc_hid_status_t kc_hid_transact(HANDLE h,
         }
         if (sent_ok) {
             *xport = KC_XPORT_FEATURE;
+        } else if (try_feature_first && *xport == KC_XPORT_AUTO) {
+            bool cancelled = false;
+            sent_ok = kc_try_write_report(
+                h, out_len, io_event, cancel_event, builder,
+                out_buf, sizeof(out_buf), debug, debug_stream, &cancelled);
+            if (cancelled) {
+                return KC_HID_CANCELLED;
+            }
+            if (sent_ok) {
+                *xport = KC_XPORT_WRITE;
+            }
         }
     }
 
@@ -982,10 +1011,12 @@ static kc_hid_status_t kc_query_handle(kc_hid_session_t *session,
         final_status = kc_hid_transact(
             h, in_len, out_len, feat_len, io_event, cancel_event,
             kc_build_status_report, kc_parse_battery_pkt, &bctx,
-            &session->preferred_transport, (attempt > 0U),
+            &session->preferred_transport,
+            (!session->transport_verified && attempt > 0U),
             attempt_timeout_ms, debug, debug_stream);
 
         if (final_status == KC_HID_OK) {
+            session->transport_verified = true;
             *out_pct = bctx.pct;
             if (out_charging) {
                 *out_charging = bctx.charging;
@@ -999,7 +1030,9 @@ static kc_hid_status_t kc_query_handle(kc_hid_session_t *session,
             break;
         }
 
-        if (attempt == 0U && session->preferred_transport == KC_XPORT_WRITE) {
+        if (!session->transport_verified &&
+            attempt == 0U &&
+            session->preferred_transport == KC_XPORT_WRITE) {
             session->preferred_transport = KC_XPORT_AUTO;
         }
 

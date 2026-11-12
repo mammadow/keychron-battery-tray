@@ -18,6 +18,20 @@ Written in C17 directly against Win32, Windows HID, and CfgMgr32 APIs (`hid.dll`
 | `45` (Muted gray) | Mouse asleep (`KC_HID_TIMEOUT`); keeps last known percentage until movement wakes it |
 | `--` / `!` | Initial startup check (`--`) or device disconnected / I/O error (`!`) |
 
+## CPU & RAM Usage
+
+Measured live on Windows x64 (`keychron-battery-tray.exe`, Ultra-Link 8K `2.4GHz` session):
+
+| Metric | Measured Footprint | Notes |
+|---|---:|---|
+| **Idle CPU** | **`0.00%`** (`0.00 ms` / 2s) | Blocked on `GetMessageW` + `WaitForMultipleObjects`; zero timer/busy loops |
+| **Startup CPU** | **`~47 ms`** (`46.9 ms`) | Cold launch, initial HID poll, paired PID lookup, and first `HICON` render |
+| **Private RAM** | **`~4.6 MB`** (`4.57 MB`) | Actual per-process private memory commit |
+| **Working Set** | **`~12.6 MB`** (`12.64 MB`) | Includes shared Windows `SHELL32.dll` / `GDI32` / `CfgMgr32` pages (`12.66 MB` peak) |
+| **Handles & GDI** | **`128` handles** | `17` GDI objects / `9` USER objects (`16`-slot MRU icon cache caps GDI growth) |
+| **Loaded DLLs** | **`29` DLLs** | Uses `CfgMgr32`; avoids `SETUPAPI.dll`, `CRYPT32.dll`, and lazy-loads `BluetoothApis.dll` |
+| **Binary Size** | **`60.5 KB` / `40 KB`** | `keychron-battery-tray.exe` (`60.5 KB`) + `keychron-battery.exe` (`40 KB`) |
+
 ## Features
 
 - **Native Windows 11 typography**: renders `Segoe UI Variable Text` Regular at `0.75×` tray icon size (`12 DIPs`, falling back to `Segoe UI` on Windows 10) into a `16`-slot MRU in-memory `CreateIconIndirect` `HICON` cache (zero temp `.ico` files, bounded GDI handles).

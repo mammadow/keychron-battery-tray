@@ -50,6 +50,7 @@ typedef struct kc_hid_session {
     uint16_t cached_pid;
     int cached_interface;
     kc_hid_transport_t preferred_transport;
+    bool transport_verified;
     kc_hid_device_info_t cached_info;
     bool has_info;
     kc_hid_link_t active_link;
