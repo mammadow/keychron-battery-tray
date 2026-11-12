@@ -299,12 +299,61 @@ static void test_recv_state_and_model_lookup(void) {
 
     KC_CHECK(strcmp(kc_model_name_for_pid(0xD048U), "Keychron M5") == 0);
     KC_CHECK(strcmp(kc_model_name_for_pid(0xD049U), "Keychron M6 8K") == 0);
-    KC_CHECK(kc_model_name_for_pid(0xD056U) == NULL);
+    KC_CHECK(strcmp(kc_model_name_for_pid(0xD056U), "Keychron M7 8K") == 0);
+    KC_CHECK(kc_model_name_for_pid(0xD099U) == NULL);
+}
+
+static void test_charging_cadence_full_alert_and_drain(void) {
+    kc_poll_state_t st;
+    kc_poll_state_init(&st);
+
+    /* Charging caps normal steady interval (e.g. 30m) down to KEYCHRON_CHARGING_POLL_MS (2m). */
+    kc_poll_state_record_success(&st, 55U, true, 1000ULL);
+    KC_CHECK(kc_next_wait_ms(&st) == KEYCHRON_CHARGING_POLL_MS);
+    KC_CHECK(kc_next_wait_ms_for(&st, 60U * 1000U) == 60U * 1000U);
+
+    /* Full battery alert fires once at 100% charging with 95% re-arm hysteresis. */
+    KC_CHECK(!kc_check_full_battery_alert(&st, true));
+    kc_poll_state_record_success(&st, 100U, false, 2000ULL);
+    KC_CHECK(!kc_check_full_battery_alert(&st, true));
+    kc_poll_state_record_success(&st, 100U, true, 3000ULL);
+    KC_CHECK(!kc_check_full_battery_alert(&st, false)); /* disabled */
+    KC_CHECK(kc_check_full_battery_alert(&st, true));
+    KC_CHECK(!kc_check_full_battery_alert(&st, true));
+
+    kc_poll_state_record_success(&st, 97U, true, 4000ULL);
+    kc_poll_state_record_success(&st, 100U, true, 5000ULL);
+    KC_CHECK(!kc_check_full_battery_alert(&st, true)); /* inside 96..100 hysteresis */
+
+    kc_poll_state_record_success(&st, 95U, true, 6000ULL);
+    KC_CHECK(!kc_check_full_battery_alert(&st, true));
+    kc_poll_state_record_success(&st, 100U, true, 7000ULL);
+    KC_CHECK(kc_check_full_battery_alert(&st, true));
+
+    /* Active drain estimation: anchor at 90%, exclude sleep/failure gaps, measure 90m active drop -> 87%. */
+    uint32_t rate_x10 = 0U, hours_x10 = 0U;
+    kc_poll_state_init(&st);
+    kc_poll_state_record_success(&st, 90U, false, 1000ULL);
+    KC_CHECK(!kc_estimate_drain(&st, &rate_x10, &hours_x10));
+
+    kc_poll_state_record_success(&st, 89U, false, 1000ULL + 30ULL * 60ULL * 1000ULL);
+    KC_CHECK(!kc_estimate_drain(&st, &rate_x10, &hours_x10)); /* only 1% drop */
+
+    /* Simulate overnight sleep failure gap (4h) -> must NOT count toward active_drain_ms. */
+    kc_poll_state_record_failure(&st);
+    kc_poll_state_record_success(&st, 89U, false, 1000ULL + 270ULL * 60ULL * 1000ULL);
+    KC_CHECK(!kc_estimate_drain(&st, &rate_x10, &hours_x10));
+
+    /* Add 60 active minutes -> 90m active total, 3% drop (2.0%/h), 87% -> 43.5h left. */
+    kc_poll_state_record_success(&st, 87U, false, 1000ULL + 330ULL * 60ULL * 1000ULL);
+    KC_CHECK(kc_estimate_drain(&st, &rate_x10, &hours_x10));
+    KC_CHECK(rate_x10 == 20U && hours_x10 == 435U);
 }
 
 int main(void) {
     test_build_and_parse_report();
     test_recv_state_and_model_lookup();
+    test_charging_cadence_full_alert_and_drain();
     test_path_helpers();
     test_score_candidate_ranking();
     test_backoff_and_clamps();

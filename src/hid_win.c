@@ -101,11 +101,25 @@ void kc_hid_session_invalidate(kc_hid_session_t *session) {
     session->preferred_transport = KC_XPORT_AUTO;
     session->has_info = false;
     memset(&session->cached_info, 0, sizeof(session->cached_info));
+    session->active_link = KC_LINK_UNKNOWN;
     session->cached_ble_path[0] = L'\0';
     session->cached_ble_is_svc = false;
     session->paired_probed = false;
     session->paired_vid = 0U;
     session->paired_pid = 0U;
+}
+
+static kc_hid_link_t kc_infer_hid_link(const kc_hid_device_info_t *info) {
+    if (!info) {
+        return KC_LINK_UNKNOWN;
+    }
+    if (info->pid == KEYCHRON_RECEIVER_PID) {
+        return KC_LINK_24G;
+    }
+    if (info->interface_number >= 0) {
+        return KC_LINK_USB;
+    }
+    return KC_LINK_BLE;
 }
 
 size_t kc_hid_list_devices(uint16_t filter_vid,
@@ -442,11 +456,17 @@ static bool kc_try_ble_gatt_fallback(kc_hid_session_t *session,
                 fprintf(debug_stream, "[debug] BLE GATT Battery Service 0x180F (cached) -> %u%%\n",
                         (unsigned)*out_pct);
             }
+            session->active_link = KC_LINK_BLE;
+            session->paired_probed = false;
+            session->paired_vid = 0U;
+            session->paired_pid = 0U;
             return true;
         }
         session->cached_ble_path[0] = L'\0';
         session->cached_ble_is_svc = false;
-        session->has_info = false;
+        if (session->cached_path[0] == L'\0') {
+            session->has_info = false;
+        }
     }
 
     /* First try per-service GATT interface (Battery Service 0x180F), then device interface. */
@@ -504,6 +524,10 @@ static bool kc_try_ble_gatt_fallback(kc_hid_session_t *session,
                     session->cached_info.vid = KEYCHRON_VID;
                     session->cached_info.interface_number = -1;
                     session->has_info = true;
+                    session->active_link = KC_LINK_BLE;
+                    session->paired_probed = false;
+                    session->paired_vid = 0U;
+                    session->paired_pid = 0U;
                 }
                 SetupDiDestroyDeviceInfoList(dev_info);
                 return true;
@@ -579,11 +603,24 @@ static bool kc_try_std_hid_battery_fallback(kc_hid_session_t *session,
             if (session) {
                 session->cached_info = list[i];
                 session->has_info = true;
+                session->active_link = kc_infer_hid_link(&list[i]);
+                session->paired_probed = false;
+                session->paired_vid = 0U;
+                session->paired_pid = 0U;
             }
             return true;
         }
     }
     return false;
+}
+
+static bool kc_try_any_fallback(kc_hid_session_t *session,
+                                uint16_t vid,
+                                bool debug,
+                                FILE *debug_stream,
+                                uint8_t *out_pct) {
+    return kc_try_std_hid_battery_fallback(session, vid, debug, debug_stream, out_pct) ||
+           kc_try_ble_gatt_fallback(session, debug, debug_stream, out_pct);
 }
 
 static HANDLE kc_open_cached_or_discover(kc_hid_session_t *session,
@@ -912,17 +949,25 @@ kc_hid_status_t kc_hid_query_battery(kc_hid_session_t *session,
         session = &local_session;
     }
 
+    /* Fast path when already operating in Bluetooth LE mode with a cached GATT path. */
+    if (pid == 0U && interface_num < 0 &&
+        session->active_link == KC_LINK_BLE &&
+        session->cached_ble_path[0] != L'\0') {
+        if (kc_try_ble_gatt_fallback(session, debug, debug_stream, out_pct)) {
+            return KC_HID_OK;
+        }
+        kc_hid_session_invalidate(session);
+    }
+
     for (int pass = 0; pass < 2; ++pass) {
         bool used_cache = false;
         kc_hid_status_t open_err = KC_HID_OK;
         HANDLE h = kc_open_cached_or_discover(
             session, vid, pid, interface_num, &used_cache, &open_err);
         if (h == INVALID_HANDLE_VALUE) {
-            if (open_err == KC_HID_NOT_FOUND && pid == 0U && interface_num < 0) {
-                if (kc_try_std_hid_battery_fallback(session, vid, debug, debug_stream, out_pct) ||
-                    kc_try_ble_gatt_fallback(session, debug, debug_stream, out_pct)) {
-                    return KC_HID_OK;
-                }
+            if (open_err == KC_HID_NOT_FOUND && pid == 0U && interface_num < 0 &&
+                kc_try_any_fallback(session, vid, debug, debug_stream, out_pct)) {
+                return KC_HID_OK;
             }
             return open_err;
         }
@@ -932,12 +977,25 @@ kc_hid_status_t kc_hid_query_battery(kc_hid_session_t *session,
             debug, debug_stream, out_pct, out_charging);
         CloseHandle(h);
 
+        if (st == KC_HID_OK) {
+            if (session->has_info) {
+                session->active_link = kc_infer_hid_link(&session->cached_info);
+            }
+            return KC_HID_OK;
+        }
         if (st == KC_HID_IO_ERROR && used_cache && pass == 0 && !kc_is_cancelled(cancel_event)) {
             kc_hid_session_invalidate(session);
             continue;
         }
         if (st == KC_HID_IO_ERROR && used_cache) {
             kc_hid_session_invalidate(session);
+        }
+        /* Allow Bluetooth / std HID fallback even when the 2.4GHz receiver stays docked. */
+        if (st == KC_HID_TIMEOUT && pid == 0U && interface_num < 0 &&
+            session->has_info && session->cached_info.pid == KEYCHRON_RECEIVER_PID &&
+            !kc_is_cancelled(cancel_event) &&
+            kc_try_any_fallback(session, vid, debug, debug_stream, out_pct)) {
+            return KC_HID_OK;
         }
         return st;
     }
@@ -954,5 +1012,23 @@ const wchar_t *kc_hid_status_text_w(kc_hid_status_t status) {
         case KC_HID_TIMEOUT:     return L"no response (mouse asleep/off)";
         case KC_HID_CANCELLED:   return L"cancelled";
         default:                 return L"unknown error";
+    }
+}
+
+const wchar_t *kc_hid_link_label_w(kc_hid_link_t link) {
+    switch (link) {
+        case KC_LINK_24G: return L"2.4GHz";
+        case KC_LINK_USB: return L"USB";
+        case KC_LINK_BLE: return L"BLE";
+        default:          return L"";
+    }
+}
+
+const char *kc_hid_link_label_a(kc_hid_link_t link) {
+    switch (link) {
+        case KC_LINK_24G: return "2.4GHz";
+        case KC_LINK_USB: return "USB";
+        case KC_LINK_BLE: return "BLE";
+        default:          return "";
     }
 }

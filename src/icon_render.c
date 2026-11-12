@@ -199,6 +199,11 @@ static HICON kc_render_tray_icon(const char *text,
         fg_r = light_taskbar ? 16U : 108U;
         fg_g = light_taskbar ? 124U : 203U;
         fg_b = light_taskbar ? 16U : 95U;
+    } else if (tone == KC_TONE_STALE) {
+        uint8_t muted = light_taskbar ? 115U : 152U;
+        fg_r = muted;
+        fg_g = muted;
+        fg_b = muted;
     } else {
         uint8_t fg = light_taskbar ? 24U : 255U;
         fg_r = fg;

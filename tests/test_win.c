@@ -18,7 +18,8 @@ typedef enum kc_fg_expect {
     KC_FG_WHITE = 0,
     KC_FG_DARK,
     KC_FG_RED,
-    KC_FG_GREEN
+    KC_FG_GREEN,
+    KC_FG_GRAY
 } kc_fg_expect_t;
 
 static void verify_hicon_layout(HICON hicon,
@@ -75,6 +76,9 @@ static void verify_hicon_layout(HICON hicon,
                 } else if (fg == KC_FG_GREEN) {
                     uint8_t b = (uint8_t)(px & 0xFFU);
                     KC_CHECK(g >= r && g >= b);
+                } else if (fg == KC_FG_GRAY) {
+                    uint8_t b = (uint8_t)(px & 0xFFU);
+                    KC_CHECK(r == g && g == b && r <= a);
                 } else {
                     KC_CHECK(r <= a);
                 }
@@ -108,13 +112,16 @@ int main(void) {
     HICON h46_again = kc_icon_cache_get(&cache, "46", 24, false, KC_TONE_NORMAL);
     KC_CHECK(h46_again == h46);
 
-    /* Low-battery and charging icon variants use distinct HICONs with red/green foregrounds. */
+    /* Low-battery, charging, and stale-sleep icon variants use distinct HICONs. */
     HICON h12_norm = kc_icon_cache_get(&cache, "12", 24, false, KC_TONE_NORMAL);
     HICON h12_low = kc_icon_cache_get(&cache, "12", 24, false, KC_TONE_LOW);
     HICON h12_chg = kc_icon_cache_get(&cache, "12", 24, false, KC_TONE_CHARGING);
+    HICON h12_stale = kc_icon_cache_get(&cache, "12", 24, false, KC_TONE_STALE);
     KC_CHECK(h12_low != h12_norm && h12_chg != h12_norm && h12_chg != h12_low);
+    KC_CHECK(h12_stale != h12_norm && h12_stale != h12_low && h12_stale != h12_chg);
     verify_hicon_layout(h12_low, 24, KC_FG_RED, 13, 13);
     verify_hicon_layout(h12_chg, 24, KC_FG_GREEN, 13, 13);
+    verify_hicon_layout(h12_stale, 24, KC_FG_GRAY, 13, 13);
 
     HICON h100_24 = kc_icon_cache_get(&cache, "100", 24, false, KC_TONE_NORMAL);
     verify_hicon_layout(h100_24, 24, KC_FG_WHITE, 11, 13);
@@ -137,6 +144,9 @@ int main(void) {
 
     HICON h46_light_chg = kc_icon_cache_get(&cache, "46", 24, true, KC_TONE_CHARGING);
     verify_hicon_layout(h46_light_chg, 24, KC_FG_GREEN, 13, 13);
+
+    HICON h46_light_stale = kc_icon_cache_get(&cache, "46", 24, true, KC_TONE_STALE);
+    verify_hicon_layout(h46_light_stale, 24, KC_FG_GRAY, 13, 13);
 
     kc_icon_cache_destroy(&cache);
     KC_CHECK(cache.count == 0U);

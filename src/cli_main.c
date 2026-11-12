@@ -151,23 +151,40 @@ static int kc_cli_run_once(kc_hid_session_t *session,
             snprintf(paired_field, sizeof(paired_field), ",\"paired_pid\":\"0x%04x\"",
                      (unsigned)session->paired_pid);
         }
+        char link_field[32] = "";
+        const char *link_a = kc_hid_link_label_a(session->active_link);
+        if (link_a[0] != '\0') {
+            snprintf(link_field, sizeof(link_field), ",\"link\":\"%s\"", link_a);
+        }
         printf("{\"ok\":true,\"vid\":\"0x%04x\",\"pid\":\"0x%04x\",\"interface\":%d,"
-               "\"product\":\"%s\"%s,\"battery\":%u,\"charging\":%s}\n",
-               out_vid, out_pid, out_iface, prod_esc, paired_field,
+               "\"product\":\"%s\"%s%s,\"battery\":%u,\"charging\":%s}\n",
+               out_vid, out_pid, out_iface, prod_esc, paired_field, link_field,
                (unsigned)pct, charging ? "true" : "false");
         fflush(stdout);
     } else if (raw_mode) {
         wprintf(L"%u\n", (unsigned)pct);
         fflush(stdout);
-    } else if (watch_mode) {
-        SYSTEMTIME lt;
-        GetLocalTime(&lt);
-        wprintf(L"[%02u:%02u:%02u] Battery: %u%%%ls\n",
-                (unsigned)lt.wHour, (unsigned)lt.wMinute, (unsigned)lt.wSecond,
-                (unsigned)pct, charging ? L" (charging)" : L"");
-        fflush(stdout);
     } else {
-        wprintf(L"Battery: %u%%%ls\n", (unsigned)pct, charging ? L" (charging)" : L"");
+        const wchar_t *link_w = kc_hid_link_label_w(session->active_link);
+        wchar_t suffix[48] = L"";
+        if (link_w[0] != L'\0' && charging) {
+            _snwprintf(suffix, 48, L" (%ls, charging)", link_w);
+        } else if (link_w[0] != L'\0') {
+            _snwprintf(suffix, 48, L" (%ls)", link_w);
+        } else if (charging) {
+            _snwprintf(suffix, 48, L" (charging)");
+        }
+        suffix[47] = L'\0';
+        if (watch_mode) {
+            SYSTEMTIME lt;
+            GetLocalTime(&lt);
+            wprintf(L"[%02u:%02u:%02u] Battery: %u%%%ls\n",
+                    (unsigned)lt.wHour, (unsigned)lt.wMinute, (unsigned)lt.wSecond,
+                    (unsigned)pct, suffix);
+            fflush(stdout);
+        } else {
+            wprintf(L"Battery: %u%%%ls\n", (unsigned)pct, suffix);
+        }
     }
     return 0;
 }

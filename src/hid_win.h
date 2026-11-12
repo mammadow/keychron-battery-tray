@@ -24,6 +24,13 @@ typedef enum kc_hid_transport {
     KC_XPORT_FEATURE = 2
 } kc_hid_transport_t;
 
+typedef enum kc_hid_link {
+    KC_LINK_UNKNOWN = 0,
+    KC_LINK_24G = 1,
+    KC_LINK_USB = 2,
+    KC_LINK_BLE = 3
+} kc_hid_link_t;
+
 typedef struct kc_hid_device_info {
     wchar_t path[MAX_PATH];
     wchar_t product[128];
@@ -45,6 +52,7 @@ typedef struct kc_hid_session {
     kc_hid_transport_t preferred_transport;
     kc_hid_device_info_t cached_info;
     bool has_info;
+    kc_hid_link_t active_link;
     wchar_t cached_ble_path[MAX_PATH];
     bool cached_ble_is_svc;
     bool paired_probed;
@@ -91,5 +99,7 @@ kc_hid_status_t kc_hid_query_battery(kc_hid_session_t *session,
                                      bool *out_charging);
 
 const wchar_t *kc_hid_status_text_w(kc_hid_status_t status);
+const wchar_t *kc_hid_link_label_w(kc_hid_link_t link);
+const char *kc_hid_link_label_a(kc_hid_link_t link);
 
 #endif /* KEYCHRON_HID_WIN_H */

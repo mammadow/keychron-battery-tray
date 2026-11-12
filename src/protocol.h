@@ -27,9 +27,12 @@
 #define KEYCHRON_DEFAULT_INTERFACE   4
 
 #define KEYCHRON_POLL_INTERVAL_MS  (30U * 60U * 1000U)
+#define KEYCHRON_CHARGING_POLL_MS  (2U * 60U * 1000U)
 #define KEYCHRON_LOW_BATTERY_PCT   15U
 #define KEYCHRON_LOW_BATTERY_HYST  5U
 #define KEYCHRON_STALE_GRACE_MAX   2U
+#define KEYCHRON_DRAIN_MAX_GAP_MS  (90ULL * 60ULL * 1000ULL)
+#define KEYCHRON_DRAIN_MIN_SPAN_MS (30ULL * 60ULL * 1000ULL)
 
 typedef struct kc_hid_candidate {
     uint16_t vid;
@@ -46,6 +49,11 @@ typedef struct kc_poll_state {
     uint64_t last_success_ms;
     uint32_t consecutive_failures;
     bool low_battery_notified;
+    bool full_battery_notified;
+    bool has_drain_anchor;
+    uint8_t drain_anchor_pct;
+    uint64_t active_drain_ms;
+    bool drain_gap_tainted;
 } kc_poll_state_t;
 
 /**
@@ -151,6 +159,21 @@ bool kc_should_show_error_glyph(const kc_poll_state_t *st);
  * re-arms once battery rises at least KEYCHRON_LOW_BATTERY_HYST points above threshold.
  */
 bool kc_check_low_battery_alert(kc_poll_state_t *st, uint8_t threshold_pct);
+
+/**
+ * Return true once when charging reaches 100% (if enabled);
+ * re-arms once battery drops to or below (100 - KEYCHRON_LOW_BATTERY_HYST).
+ */
+bool kc_check_full_battery_alert(kc_poll_state_t *st, bool enabled);
+
+/**
+ * Estimate active-session battery drain rate (tenths of % per hour, e.g. 18 = 1.8%/h)
+ * and remaining active runtime (tenths of an hour). Returns false until >= 2% drop
+ * over >= 30 active discharging minutes is observed.
+ */
+bool kc_estimate_drain(const kc_poll_state_t *st,
+                       uint32_t *out_rate_pct_x10,
+                       uint32_t *out_hours_x10);
 
 /** Parse unsigned 16-bit integer (decimal or 0x hex) from wide string. */
 bool kc_parse_u16_w(const wchar_t *arg, uint16_t *out);

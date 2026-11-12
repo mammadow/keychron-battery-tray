@@ -7,6 +7,7 @@
 typedef struct kc_tray_settings {
     uint32_t poll_minutes;
     uint8_t low_alert_pct;
+    bool notify_full;
     uint16_t target_pid;
     int32_t target_interface;
 } kc_tray_settings_t;

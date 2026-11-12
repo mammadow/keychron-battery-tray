@@ -102,6 +102,7 @@ const char *kc_model_name_for_pid(uint16_t pid) {
     switch (pid) {
         case 0xD048U: return "Keychron M5";
         case 0xD049U: return "Keychron M6 8K";
+        case 0xD056U: return "Keychron M7 8K";
         default:      return NULL;
     }
 }
@@ -339,6 +340,30 @@ void kc_poll_state_record_success(kc_poll_state_t *st,
     if (!st) {
         return;
     }
+    if (charging) {
+        st->has_drain_anchor = false;
+        st->drain_anchor_pct = pct;
+        st->active_drain_ms = 0ULL;
+        st->drain_gap_tainted = false;
+    } else if (!st->has_drain_anchor || st->last_charging || pct > st->drain_anchor_pct) {
+        st->has_drain_anchor = true;
+        st->drain_anchor_pct = pct;
+        st->active_drain_ms = 0ULL;
+        st->drain_gap_tainted = false;
+    } else if (st->has_reading) {
+        uint64_t dt = (now_ms > st->last_success_ms) ? (now_ms - st->last_success_ms) : 0ULL;
+        if (!st->drain_gap_tainted && dt > 0ULL && dt <= KEYCHRON_DRAIN_MAX_GAP_MS) {
+            st->active_drain_ms += dt;
+        } else if (pct < st->last_pct) {
+            /* Exclude drops that happened while disconnected or asleep > max gap. */
+            uint8_t lost_offline = (uint8_t)(st->last_pct - pct);
+            st->drain_anchor_pct = (st->drain_anchor_pct >= lost_offline)
+                ? (uint8_t)(st->drain_anchor_pct - lost_offline)
+                : pct;
+        }
+        st->drain_gap_tainted = false;
+    }
+
     st->has_reading = true;
     st->last_pct = pct;
     st->last_charging = charging;
@@ -353,6 +378,8 @@ void kc_poll_state_record_failure(kc_poll_state_t *st) {
     if (st->consecutive_failures < UINT32_MAX) {
         st->consecutive_failures++;
     }
+    /* Exclude sleep/disconnect gaps from active drain-rate accumulation. */
+    st->drain_gap_tainted = true;
 }
 
 uint32_t kc_next_wait_ms_for(const kc_poll_state_t *st, uint32_t normal_interval_ms) {
@@ -366,6 +393,10 @@ uint32_t kc_next_wait_ms_for(const kc_poll_state_t *st, uint32_t normal_interval
         normal_interval_ms = 10000U;
     }
     if (!st || st->consecutive_failures == 0U) {
+        if (st && st->has_reading && st->last_charging &&
+            normal_interval_ms > KEYCHRON_CHARGING_POLL_MS) {
+            return KEYCHRON_CHARGING_POLL_MS;
+        }
         return normal_interval_ms;
     }
     size_t idx = (size_t)(st->consecutive_failures - 1U);
@@ -406,6 +437,54 @@ bool kc_check_low_battery_alert(kc_poll_state_t *st, uint8_t threshold_pct) {
         st->low_battery_notified = false;
     }
     return false;
+}
+
+bool kc_check_full_battery_alert(kc_poll_state_t *st, bool enabled) {
+    if (!st || !enabled || !st->has_reading || st->consecutive_failures > 0U) {
+        return false;
+    }
+    if (st->last_pct <= (uint8_t)(100U - KEYCHRON_LOW_BATTERY_HYST)) {
+        st->full_battery_notified = false;
+        return false;
+    }
+    if (st->last_charging && st->last_pct == 100U && !st->full_battery_notified) {
+        st->full_battery_notified = true;
+        return true;
+    }
+    return false;
+}
+
+bool kc_estimate_drain(const kc_poll_state_t *st,
+                       uint32_t *out_rate_pct_x10,
+                       uint32_t *out_hours_x10) {
+    if (!st || !st->has_reading || st->last_charging || !st->has_drain_anchor ||
+        st->active_drain_ms < KEYCHRON_DRAIN_MIN_SPAN_MS) {
+        return false;
+    }
+    if (st->drain_anchor_pct <= st->last_pct) {
+        return false;
+    }
+    uint32_t drop = (uint32_t)(st->drain_anchor_pct - st->last_pct);
+    if (drop < 2U) {
+        return false;
+    }
+
+    uint64_t num_rate = (uint64_t)drop * 36000000ULL + (st->active_drain_ms / 2ULL);
+    uint64_t rate_x10 = num_rate / st->active_drain_ms;
+    if (rate_x10 < 1ULL || rate_x10 > 500ULL) {
+        return false;
+    }
+
+    uint64_t denom_ms = (uint64_t)drop * 360000ULL;
+    uint64_t rem_hours_x10 = ((uint64_t)st->last_pct * st->active_drain_ms + (denom_ms / 2ULL)) / denom_ms;
+
+    if (out_rate_pct_x10) {
+        *out_rate_pct_x10 = (uint32_t)rate_x10;
+    }
+    if (out_hours_x10) {
+        *out_hours_x10 = (uint32_t)rem_hours_x10;
+    }
+    return true;
 }
 
 bool kc_parse_u16_w(const wchar_t *arg, uint16_t *out) {
