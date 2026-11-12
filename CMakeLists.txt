@@ -63,7 +63,7 @@ add_library(keychron_win STATIC
 )
 target_include_directories(keychron_win PUBLIC src)
 target_compile_options(keychron_win PRIVATE ${KC_WARN_FLAGS} ${KC_OPT_FLAGS})
-target_link_libraries(keychron_win PUBLIC keychron_pure hid setupapi bluetoothapis gdi32 user32 advapi32)
+target_link_libraries(keychron_win PUBLIC keychron_pure hid cfgmgr32 gdi32 user32 advapi32)
 
 add_executable(keychron-battery-tray WIN32
     src/tray_main.c
@@ -87,7 +87,7 @@ if(MSVC)
 else()
     target_link_options(keychron-battery PRIVATE -municode ${KC_LINK_OPT_FLAGS})
 endif()
-target_link_libraries(keychron-battery PRIVATE keychron_win hid setupapi)
+target_link_libraries(keychron-battery PRIVATE keychron_win hid)
 
 install(TARGETS keychron-battery-tray keychron-battery RUNTIME DESTINATION bin)
 

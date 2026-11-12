@@ -407,6 +407,19 @@ uint32_t kc_next_wait_ms_for(const kc_poll_state_t *st, uint32_t normal_interval
     return k_backoff_ms[idx];
 }
 
+uint32_t kc_next_wait_ms_for_wake(const kc_poll_state_t *st,
+                                   uint32_t normal_interval_ms,
+                                   bool raw_wake_armed) {
+    uint32_t base = kc_next_wait_ms_for(st, normal_interval_ms);
+    if (!raw_wake_armed || !st || st->consecutive_failures < 5U) {
+        return base;
+    }
+    if (normal_interval_ms < 10000U) {
+        normal_interval_ms = 10000U;
+    }
+    return (normal_interval_ms > base) ? normal_interval_ms : base;
+}
+
 uint32_t kc_next_wait_ms(const kc_poll_state_t *st) {
     return kc_next_wait_ms_for(st, KEYCHRON_POLL_INTERVAL_MS);
 }

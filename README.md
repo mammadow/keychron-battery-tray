@@ -6,7 +6,7 @@
 
 Native Windows system tray battery indicator and CLI diagnostic utility for Keychron wireless mice using the vendor HID protocol (confirmed with the Keychron Ultra-Link 8K receiver `VID 0x3434 / PID 0xD028` and Keychron M7 8K `0xD056`, USB interface `4`, Usage Page `0xFFC1`), with automatic fallbacks for standard HID Battery Strength (`0x06`/`0x20`) and Bluetooth LE Battery Service (`0x180F`/`0x2A19`).
 
-Written in C17 directly against Win32, Windows HID, and Windows BLE GATT APIs (`hid.dll`, `setupapi.dll`, `bluetoothapis.dll`, `shell32.dll`, `gdi32.dll`, `advapi32.dll`) for zero external runtime dependencies, compact binaries (`65 KB` tray / `39 KB` CLI), ~5 MB private memory footprint, and event-driven idle behavior.
+Written in C17 directly against Win32, Windows HID, and CfgMgr32 APIs (`hid.dll`, `cfgmgr32.dll`, `shell32.dll`, `gdi32.dll`, `advapi32.dll`, loading `BluetoothApis.dll` on demand only when BLE fallback is active) for zero external runtime dependencies, compact binaries (`60.5 KB` tray / `40 KB` CLI), ~4.6 MB private memory footprint (~12.6 MB working set), and zero idle CPU wakeups.
 
 ## Tray Icon States
 
@@ -20,13 +20,13 @@ Written in C17 directly against Win32, Windows HID, and Windows BLE GATT APIs (`
 
 ## Features
 
-- **Native Windows 11 typography**: renders `Segoe UI Variable Text` Regular at `0.75×` tray icon size (`12 DIPs`, falling back to `Segoe UI` on Windows 10) into an in-memory `CreateIconIndirect` `HICON` cache (zero temp `.ico` files).
+- **Native Windows 11 typography**: renders `Segoe UI Variable Text` Regular at `0.75×` tray icon size (`12 DIPs`, falling back to `Segoe UI` on Windows 10) into a `16`-slot MRU in-memory `CreateIconIndirect` `HICON` cache (zero temp `.ico` files, bounded GDI handles).
 - **Charging & smart alerts**: decodes byte `20` charging status (`0x80`), polls every `2m` while charging, and fires one-time Quiet-Time-aware Windows notifications (with hysteresis) for low battery and optional full charge (`100%`).
-- **Multi-mode fallback & paired model resolution**: identifies paired mice behind the Ultra-Link 8K dongle via `0xB5 0x03` (`Keychron M5`, `M6 8K`, `M7 8K`), shows the active link (`2.4GHz`, `USB`, or `BLE`), prefers wired USB when plugged in, and seamlessly falls back to BLE GATT even if the 2.4GHz receiver remains docked.
+- **Multi-mode fallback & paired model resolution**: identifies paired mice behind the Ultra-Link 8K dongle via `0xB5 0x03` (`Keychron M5`, `M6 8K`, `M7 8K`), shows the active link (`2.4GHz`, `USB`, or `BLE`), prefers wired USB when plugged in, and falls back to BLE GATT behind a docked 2.4GHz receiver with a `5m` miss cooldown so sleeping mice don't trigger repeated scans.
 - **Active drain estimator**: tracks discharging usage across connected intervals (excluding idle sleep and offline gaps) to estimate `%/h` drain rate and remaining active hours in the tray menu.
-- **Event-driven wakeups & instant exit**: uses `WM_POWERBROADCAST` resume, `GUID_CONSOLE_DISPLAY_STATE` Modern Standby wake (60s cooldown), VID-filtered `WM_DEVICECHANGE` hotplug (`1.5s` settle on USB unplug), on-demand Raw Input mouse wake (`VID_3434` only — ignores touchpads and other mice), `TaskbarCreated` recovery, and `CancelIoEx` cancellation on quit.
+- **Event-driven wakeups & instant exit**: uses `WM_POWERBROADCAST` resume, `GUID_CONSOLE_DISPLAY_STATE` Modern Standby wake (60s cooldown), VID-filtered `WM_DEVICECHANGE` hotplug (`1.5s` settle on USB unplug), on-demand Raw Input mouse wake (`VID_3434` only — ignores touchpads and other mice, and scales prolonged sleep backoff up to your `Poll interval` while armed), `TaskbarCreated` recovery, and `CancelIoEx` cancellation on quit.
 - **Per-Monitor V2 DPI & theme aware**: adapts live to `WM_DPICHANGED`, `WM_DISPLAYCHANGE`, and `ImmersiveColorSet` (`SystemUsesLightTheme`).
-- **Cached HID & BLE GATT discovery**: caches both vendor HID interfaces and Bluetooth LE `0x180F` service/device paths across polls and `--watch` runs.
+- **Lightweight `CfgMgr32` enumeration & caching**: avoids loading `SETUPAPI.dll` or `BluetoothApis.dll` in USB/2.4GHz sessions and caches both vendor HID interfaces and BLE GATT `0x180F` paths across polls and `--watch` runs.
 - **Persisted tray preferences**: stores settings (`PollMinutes`, `LowAlertPct`, `NotifyFull`, `TargetPid`, `TargetInterface`) under `HKCU\Software\KeychronBatteryTray` and optional auto-start under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
 ## Layout

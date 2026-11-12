@@ -148,6 +148,20 @@ int main(void) {
     HICON h46_light_stale = kc_icon_cache_get(&cache, "46", 24, true, KC_TONE_STALE);
     verify_hicon_layout(h46_light_stale, 24, KC_FG_GRAY, 13, 13);
 
+    /* Verify compact MRU eviction keeps cache bounded to KC_ICON_CACHE_CAP (16). */
+    HICON h_keep = kc_icon_cache_get(&cache, "10", 24, true, KC_TONE_NORMAL);
+    for (int pct = 11; pct < 11 + (int)KC_ICON_CACHE_CAP - 1; ++pct) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d", pct);
+        KC_CHECK(kc_icon_cache_get(&cache, buf, 24, true, KC_TONE_NORMAL) != NULL);
+    }
+    KC_CHECK(cache.count == KC_ICON_CACHE_CAP);
+    /* Re-touch "10" to promote it to MRU before adding extra entries. */
+    KC_CHECK(kc_icon_cache_get(&cache, "10", 24, true, KC_TONE_NORMAL) == h_keep);
+    KC_CHECK(kc_icon_cache_get(&cache, "99", 24, true, KC_TONE_NORMAL) != NULL);
+    KC_CHECK(cache.count == KC_ICON_CACHE_CAP);
+    KC_CHECK(kc_icon_cache_get(&cache, "10", 24, true, KC_TONE_NORMAL) == h_keep);
+
     kc_icon_cache_destroy(&cache);
     KC_CHECK(cache.count == 0U);
 

@@ -58,6 +58,7 @@ typedef struct kc_hid_session {
     bool paired_probed;
     uint16_t paired_vid;
     uint16_t paired_pid;
+    uint64_t next_fallback_probe_ms;
 } kc_hid_session_t;
 
 void kc_hid_session_init(kc_hid_session_t *session);

@@ -2,9 +2,10 @@
 #include "protocol.h"
 
 #include <bluetoothleapis.h>
+#include <devpropdef.h>
+#include <cfgmgr32.h>
 #include <hidsdi.h>
 #include <hidpi.h>
-#include <setupapi.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -12,6 +13,7 @@
 #define KC_BT_UUID_BATTERY_LEVEL   0x2A19U
 #define KC_HID_PAGE_GENERIC_DEV    0x0006U
 #define KC_HID_USAGE_BATTERY       0x0020U
+#define KC_FALLBACK_COOLDOWN_MS    (5ULL * 60ULL * 1000ULL)
 
 static const GUID KC_GUID_BTHLE_DEV = {
     0x781aee18U, 0x7733U, 0x4ce4U, {0xad, 0xd0, 0x91, 0xf4, 0x1c, 0x67, 0xb5, 0x92}
@@ -19,6 +21,19 @@ static const GUID KC_GUID_BTHLE_DEV = {
 
 static const GUID KC_GUID_BTH_GATT_SVC = {
     0x6e3bb679U, 0x4372U, 0x40c8U, {0x9e, 0xaa, 0x45, 0x09, 0xdf, 0x26, 0x0c, 0xd8}
+};
+
+static const DEVPROPKEY KC_DEVPKEY_DEVICE_DESC = {
+    {0xa45c254eU, 0xdf1cU, 0x4efdU, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 2U
+};
+static const DEVPROPKEY KC_DEVPKEY_HARDWARE_IDS = {
+    {0xa45c254eU, 0xdf1cU, 0x4efdU, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 3U
+};
+static const DEVPROPKEY KC_DEVPKEY_FRIENDLY_NAME = {
+    {0xa45c254eU, 0xdf1cU, 0x4efdU, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 14U
+};
+static const DEVPROPKEY KC_DEVPKEY_INSTANCE_ID = {
+    {0x78c34fc8U, 0x104aU, 0x4acaU, {0x9e, 0xa4, 0x52, 0x4d, 0x52, 0x99, 0x6e, 0x57}}, 256U
 };
 
 static bool kc_is_cancelled(HANDLE cancel_event) {
@@ -107,6 +122,37 @@ void kc_hid_session_invalidate(kc_hid_session_t *session) {
     session->paired_probed = false;
     session->paired_vid = 0U;
     session->paired_pid = 0U;
+    session->next_fallback_probe_ms = 0ULL;
+}
+
+static wchar_t *kc_cm_get_interface_list(const GUID *iface_guid) {
+    if (!iface_guid) {
+        return NULL;
+    }
+    GUID guid_copy = *iface_guid;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        ULONG chars = 0U;
+        if (CM_Get_Device_Interface_List_SizeW(
+                &chars, &guid_copy, NULL, CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS ||
+            chars <= 1U) {
+            return NULL;
+        }
+        wchar_t *list = (wchar_t *)calloc((size_t)chars + 1U, sizeof(wchar_t));
+        if (!list) {
+            return NULL;
+        }
+        CONFIGRET cr = CM_Get_Device_Interface_ListW(
+            &guid_copy, NULL, list, chars, CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+        if (cr == CR_SUCCESS) {
+            list[chars] = L'\0';
+            return list;
+        }
+        free(list);
+        if (cr != CR_BUFFER_SMALL) {
+            return NULL;
+        }
+    }
+    return NULL;
 }
 
 static kc_hid_link_t kc_infer_hid_link(const kc_hid_device_info_t *info) {
@@ -128,34 +174,15 @@ size_t kc_hid_list_devices(uint16_t filter_vid,
     GUID hid_guid;
     HidD_GetHidGuid(&hid_guid);
 
-    HDEVINFO dev_info = SetupDiGetClassDevsW(
-        &hid_guid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-    if (dev_info == INVALID_HANDLE_VALUE) {
+    wchar_t *paths = kc_cm_get_interface_list(&hid_guid);
+    if (!paths) {
         return 0;
     }
 
     size_t count = 0;
-    SP_DEVICE_INTERFACE_DATA if_data;
-    if_data.cbSize = sizeof(if_data);
-
-    for (DWORD idx = 0;
-         SetupDiEnumDeviceInterfaces(dev_info, NULL, &hid_guid, idx, &if_data);
-         ++idx) {
-        union {
-            SP_DEVICE_INTERFACE_DETAIL_DATA_W detail;
-            uint8_t storage[sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W) + MAX_PATH * sizeof(wchar_t)];
-        } buf;
-        memset(&buf, 0, sizeof(buf));
-        buf.detail.cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
-
-        DWORD req_size = 0;
-        if (!SetupDiGetDeviceInterfaceDetailW(
-                dev_info, &if_data, &buf.detail, sizeof(buf.storage), &req_size, NULL)) {
-            continue;
-        }
-
+    for (const wchar_t *p = paths; *p != L'\0'; p += wcslen(p) + 1U) {
         kc_hid_device_info_t info;
-        if (kc_probe_hid_path(buf.detail.DevicePath, filter_vid, &info)) {
+        if (kc_probe_hid_path(p, filter_vid, &info)) {
             if (out && count < max_out) {
                 out[count] = info;
             }
@@ -163,7 +190,7 @@ size_t kc_hid_list_devices(uint16_t filter_vid,
         }
     }
 
-    SetupDiDestroyDeviceInfoList(dev_info);
+    free(paths);
     return count;
 }
 
@@ -316,11 +343,65 @@ static bool kc_uuid_matches_short(const BTH_LE_UUID *u, USHORT expected) {
     return memcmp(&u->Value.LongUuid, &expected_long, sizeof(GUID)) == 0;
 }
 
-static bool kc_ble_read_char_from_service(HANDLE h,
+typedef HRESULT (WINAPI *kc_bt_get_svcs_fn)(
+    HANDLE, USHORT, PBTH_LE_GATT_SERVICE, USHORT *, ULONG);
+typedef HRESULT (WINAPI *kc_bt_get_chars_fn)(
+    HANDLE, PBTH_LE_GATT_SERVICE, USHORT, PBTH_LE_GATT_CHARACTERISTIC, USHORT *, ULONG);
+typedef HRESULT (WINAPI *kc_bt_get_val_fn)(
+    HANDLE, PBTH_LE_GATT_CHARACTERISTIC, ULONG, PBTH_LE_GATT_CHARACTERISTIC_VALUE, USHORT *, ULONG);
+
+typedef struct kc_bt_api {
+    kc_bt_get_svcs_fn get_services;
+    kc_bt_get_chars_fn get_characteristics;
+    kc_bt_get_val_fn get_characteristic_value;
+} kc_bt_api_t;
+
+static INIT_ONCE g_bt_init_once = INIT_ONCE_STATIC_INIT;
+static kc_bt_api_t g_bt_api = {NULL, NULL, NULL};
+
+static void kc_load_proc(HMODULE mod, const char *name, void *dst_fn_ptr, size_t dst_sz) {
+    FARPROC proc = GetProcAddress(mod, name);
+    if (proc && dst_sz == sizeof(proc)) {
+        memcpy(dst_fn_ptr, &proc, sizeof(proc));
+    }
+}
+
+static BOOL CALLBACK kc_init_bt_api_cb(PINIT_ONCE once, PVOID param, PVOID *ctx) {
+    (void)once;
+    (void)param;
+    (void)ctx;
+    HMODULE mod = LoadLibraryExW(L"BluetoothApis.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!mod) {
+        return TRUE;
+    }
+
+    kc_bt_api_t loaded = {NULL, NULL, NULL};
+    kc_load_proc(mod, "BluetoothGATTGetServices", &loaded.get_services, sizeof(loaded.get_services));
+    kc_load_proc(mod, "BluetoothGATTGetCharacteristics", &loaded.get_characteristics, sizeof(loaded.get_characteristics));
+    kc_load_proc(mod, "BluetoothGATTGetCharacteristicValue", &loaded.get_characteristic_value, sizeof(loaded.get_characteristic_value));
+
+    if (loaded.get_services && loaded.get_characteristics && loaded.get_characteristic_value) {
+        g_bt_api = loaded;
+    } else {
+        FreeLibrary(mod);
+    }
+    return TRUE;
+}
+
+static const kc_bt_api_t *kc_get_bt_api(void) {
+    InitOnceExecuteOnce(&g_bt_init_once, kc_init_bt_api_cb, NULL, NULL);
+    if (!g_bt_api.get_services || !g_bt_api.get_characteristics || !g_bt_api.get_characteristic_value) {
+        return NULL;
+    }
+    return &g_bt_api;
+}
+
+static bool kc_ble_read_char_from_service(const kc_bt_api_t *bt,
+                                          HANDLE h,
                                           PBTH_LE_GATT_SERVICE svc,
                                           uint8_t *out_pct) {
     USHORT n_chars = 0;
-    HRESULT hr = BluetoothGATTGetCharacteristics(
+    HRESULT hr = bt->get_characteristics(
         h, svc, 0, NULL, &n_chars, BLUETOOTH_GATT_FLAG_NONE);
     if ((hr != S_OK && hr != HRESULT_FROM_WIN32(ERROR_MORE_DATA)) || n_chars == 0U) {
         return false;
@@ -334,7 +415,7 @@ static bool kc_ble_read_char_from_service(HANDLE h,
 
     bool ok = false;
     USHORT actual_chars = 0;
-    hr = BluetoothGATTGetCharacteristics(
+    hr = bt->get_characteristics(
         h, svc, n_chars, chars, &actual_chars, BLUETOOTH_GATT_FLAG_NONE);
     if (SUCCEEDED(hr)) {
         for (USHORT i = 0; i < actual_chars; ++i) {
@@ -343,7 +424,7 @@ static bool kc_ble_read_char_from_service(HANDLE h,
                 continue;
             }
             USHORT val_sz = 0;
-            hr = BluetoothGATTGetCharacteristicValue(
+            hr = bt->get_characteristic_value(
                 h, &chars[i], 0, NULL, &val_sz, BLUETOOTH_GATT_FLAG_NONE);
             if ((hr != S_OK && hr != HRESULT_FROM_WIN32(ERROR_MORE_DATA)) || val_sz == 0U) {
                 continue;
@@ -353,7 +434,7 @@ static bool kc_ble_read_char_from_service(HANDLE h,
                 continue;
             }
             USHORT actual_sz = 0;
-            hr = BluetoothGATTGetCharacteristicValue(
+            hr = bt->get_characteristic_value(
                 h, &chars[i], val_sz, val, &actual_sz, BLUETOOTH_GATT_FLAG_NONE);
             if (SUCCEEDED(hr) && val->DataSize >= 1U && val->Data[0] <= 100U) {
                 *out_pct = val->Data[0];
@@ -369,25 +450,49 @@ static bool kc_ble_read_char_from_service(HANDLE h,
     return ok;
 }
 
-static bool kc_setup_prop_matches_keychron(HDEVINFO dev_info,
-                                           PSP_DEVINFO_DATA dev_data,
-                                           const wchar_t *path,
-                                           wchar_t *out_name,
-                                           size_t out_name_cap) {
+static bool kc_cm_read_str_prop(DEVINST dn,
+                                const DEVPROPKEY *key,
+                                wchar_t *out,
+                                size_t out_chars) {
+    DEVPROPTYPE ptype = 0;
+    ULONG sz = (ULONG)(out_chars * sizeof(wchar_t));
+    memset(out, 0, sz);
+    if (CM_Get_DevNode_PropertyW(dn, key, &ptype, (PBYTE)out, &sz, 0) != CR_SUCCESS) {
+        return false;
+    }
+    out[out_chars - 1U] = L'\0';
+    return out[0] != L'\0';
+}
+
+static bool kc_cm_iface_matches_keychron(const wchar_t *path,
+                                         wchar_t *out_name,
+                                         size_t out_name_cap) {
     if (out_name && out_name_cap > 0U) {
         out_name[0] = L'\0';
     }
     bool matched = kc_contains_ascii_ci_w(path, "keychron") ||
                    kc_contains_ascii_ci_w(path, "3434");
 
-    DWORD props[] = {SPDRP_FRIENDLYNAME, SPDRP_DEVICEDESC, SPDRP_HARDWAREID};
-    for (size_t p = 0; p < sizeof(props) / sizeof(props[0]); ++p) {
+    wchar_t inst_id[MAX_DEVICE_ID_LEN];
+    DEVPROPTYPE ptype = 0;
+    ULONG inst_sz = sizeof(inst_id);
+    memset(inst_id, 0, sizeof(inst_id));
+    if (CM_Get_Device_Interface_PropertyW(
+            path, &KC_DEVPKEY_INSTANCE_ID, &ptype, (PBYTE)inst_id, &inst_sz, 0) != CR_SUCCESS) {
+        return matched;
+    }
+    inst_id[MAX_DEVICE_ID_LEN - 1U] = L'\0';
+
+    DEVINST dn = 0;
+    if (CM_Locate_DevNodeW(&dn, inst_id, CM_LOCATE_DEVNODE_NORMAL) != CR_SUCCESS) {
+        return matched;
+    }
+
+    const DEVPROPKEY *str_keys[2] = {&KC_DEVPKEY_FRIENDLY_NAME, &KC_DEVPKEY_DEVICE_DESC};
+    for (size_t k = 0; k < 2U; ++k) {
         wchar_t buf[256];
-        memset(buf, 0, sizeof(buf));
-        if (SetupDiGetDeviceRegistryPropertyW(
-                dev_info, dev_data, props[p], NULL, (PBYTE)buf, sizeof(buf) - sizeof(wchar_t), NULL)) {
-            if ((props[p] == SPDRP_FRIENDLYNAME || props[p] == SPDRP_DEVICEDESC) &&
-                out_name && out_name[0] == L'\0' && buf[0] != L'\0') {
+        if (kc_cm_read_str_prop(dn, str_keys[k], buf, 256U)) {
+            if (out_name && out_name[0] == L'\0') {
                 wcsncpy(out_name, buf, out_name_cap - 1U);
                 out_name[out_name_cap - 1U] = L'\0';
             }
@@ -397,12 +502,31 @@ static bool kc_setup_prop_matches_keychron(HDEVINFO dev_info,
             }
         }
     }
+
+    wchar_t hwid[512];
+    ULONG hwid_sz = (ULONG)(sizeof(hwid) - 2U * sizeof(wchar_t));
+    memset(hwid, 0, sizeof(hwid));
+    if (CM_Get_DevNode_PropertyW(
+            dn, &KC_DEVPKEY_HARDWARE_IDS, &ptype, (PBYTE)hwid, &hwid_sz, 0) == CR_SUCCESS) {
+        for (const wchar_t *entry = hwid; *entry != L'\0'; entry += wcslen(entry) + 1U) {
+            if (kc_contains_ascii_ci_w(entry, "keychron") ||
+                kc_contains_ascii_ci_w(entry, "3434")) {
+                matched = true;
+                break;
+            }
+        }
+    }
     return matched;
 }
 
 static bool kc_ble_read_device_path(const wchar_t *path,
                                     bool is_svc_if,
                                     uint8_t *out_pct) {
+    const kc_bt_api_t *bt = kc_get_bt_api();
+    if (!bt) {
+        return false;
+    }
+
     HANDLE h = CreateFileW(path,
                            GENERIC_READ,
                            FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -416,22 +540,22 @@ static bool kc_ble_read_device_path(const wchar_t *path,
 
     bool found = false;
     if (is_svc_if) {
-        found = kc_ble_read_char_from_service(h, NULL, out_pct);
+        found = kc_ble_read_char_from_service(bt, h, NULL, out_pct);
     } else {
         USHORT n_svcs = 0;
-        HRESULT hr = BluetoothGATTGetServices(
+        HRESULT hr = bt->get_services(
             h, 0, NULL, &n_svcs, BLUETOOTH_GATT_FLAG_NONE);
         if ((hr == S_OK || hr == HRESULT_FROM_WIN32(ERROR_MORE_DATA)) && n_svcs > 0U) {
             PBTH_LE_GATT_SERVICE svcs = (PBTH_LE_GATT_SERVICE)calloc(
                 n_svcs, sizeof(BTH_LE_GATT_SERVICE));
             if (svcs) {
                 USHORT actual_svcs = 0;
-                if (SUCCEEDED(BluetoothGATTGetServices(
+                if (SUCCEEDED(bt->get_services(
                         h, n_svcs, svcs, &actual_svcs, BLUETOOTH_GATT_FLAG_NONE))) {
                     for (USHORT s = 0; s < actual_svcs; ++s) {
                         if (kc_uuid_matches_short(&svcs[s].ServiceUuid,
                                                   KC_BT_UUID_BATTERY_SERVICE) &&
-                            kc_ble_read_char_from_service(h, &svcs[s], out_pct)) {
+                            kc_ble_read_char_from_service(bt, h, &svcs[s], out_pct)) {
                             found = true;
                             break;
                         }
@@ -472,53 +596,32 @@ static bool kc_try_ble_gatt_fallback(kc_hid_session_t *session,
     /* First try per-service GATT interface (Battery Service 0x180F), then device interface. */
     const GUID *guids[2] = {&KC_GUID_BTH_GATT_SVC, &KC_GUID_BTHLE_DEV};
     for (int g = 0; g < 2; ++g) {
-        HDEVINFO dev_info = SetupDiGetClassDevsW(
-            guids[g], NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-        if (dev_info == INVALID_HANDLE_VALUE) {
+        wchar_t *paths = kc_cm_get_interface_list(guids[g]);
+        if (!paths) {
             continue;
         }
 
-        SP_DEVICE_INTERFACE_DATA if_data;
-        if_data.cbSize = sizeof(if_data);
-        for (DWORD idx = 0;
-             SetupDiEnumDeviceInterfaces(dev_info, NULL, guids[g], idx, &if_data);
-             ++idx) {
-            union {
-                SP_DEVICE_INTERFACE_DETAIL_DATA_W detail;
-                uint8_t storage[sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W) + MAX_PATH * sizeof(wchar_t)];
-            } buf;
-            memset(&buf, 0, sizeof(buf));
-            buf.detail.cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
-
-            SP_DEVINFO_DATA dev_data;
-            memset(&dev_data, 0, sizeof(dev_data));
-            dev_data.cbSize = sizeof(dev_data);
-
-            if (!SetupDiGetDeviceInterfaceDetailW(
-                    dev_info, &if_data, &buf.detail, sizeof(buf.storage), NULL, &dev_data)) {
-                continue;
-            }
-            if (g == 0 && !kc_contains_ascii_ci_w(buf.detail.DevicePath, "0000180f")) {
+        for (const wchar_t *p = paths; *p != L'\0'; p += wcslen(p) + 1U) {
+            if (g == 0 && !kc_contains_ascii_ci_w(p, "0000180f")) {
                 continue;
             }
 
             wchar_t dev_name[128];
-            if (!kc_setup_prop_matches_keychron(
-                    dev_info, &dev_data, buf.detail.DevicePath, dev_name, 128)) {
+            if (!kc_cm_iface_matches_keychron(p, dev_name, 128)) {
                 continue;
             }
 
-            if (kc_ble_read_device_path(buf.detail.DevicePath, (g == 0), out_pct)) {
+            if (kc_ble_read_device_path(p, (g == 0), out_pct)) {
                 if (debug && debug_stream) {
                     fprintf(debug_stream, "[debug] BLE GATT Battery Service 0x180F -> %u%%\n",
                             (unsigned)*out_pct);
                 }
                 if (session) {
-                    wcsncpy(session->cached_ble_path, buf.detail.DevicePath, MAX_PATH - 1);
+                    wcsncpy(session->cached_ble_path, p, MAX_PATH - 1);
                     session->cached_ble_path[MAX_PATH - 1] = L'\0';
                     session->cached_ble_is_svc = (g == 0);
                     memset(&session->cached_info, 0, sizeof(session->cached_info));
-                    wcsncpy(session->cached_info.path, buf.detail.DevicePath, MAX_PATH - 1);
+                    wcsncpy(session->cached_info.path, p, MAX_PATH - 1);
                     wcsncpy(session->cached_info.product,
                             dev_name[0] ? dev_name : L"Keychron Bluetooth", 127);
                     session->cached_info.vid = KEYCHRON_VID;
@@ -529,11 +632,11 @@ static bool kc_try_ble_gatt_fallback(kc_hid_session_t *session,
                     session->paired_vid = 0U;
                     session->paired_pid = 0U;
                 }
-                SetupDiDestroyDeviceInfoList(dev_info);
+                free(paths);
                 return true;
             }
         }
-        SetupDiDestroyDeviceInfoList(dev_info);
+        free(paths);
     }
     return false;
 }
@@ -916,6 +1019,28 @@ static kc_hid_status_t kc_query_handle(kc_hid_session_t *session,
     return final_status;
 }
 
+static bool kc_try_any_fallback_throttled(kc_hid_session_t *session,
+                                          uint16_t vid,
+                                          bool debug,
+                                          FILE *debug_stream,
+                                          uint8_t *out_pct) {
+    ULONGLONG now_ms = GetTickCount64();
+    if (session && session->next_fallback_probe_ms != 0ULL &&
+        now_ms < session->next_fallback_probe_ms) {
+        return false;
+    }
+    if (kc_try_any_fallback(session, vid, debug, debug_stream, out_pct)) {
+        if (session) {
+            session->next_fallback_probe_ms = 0ULL;
+        }
+        return true;
+    }
+    if (session) {
+        session->next_fallback_probe_ms = now_ms + KC_FALLBACK_COOLDOWN_MS;
+    }
+    return false;
+}
+
 kc_hid_status_t kc_hid_query_battery(kc_hid_session_t *session,
                                      uint16_t vid,
                                      uint16_t pid,
@@ -954,6 +1079,7 @@ kc_hid_status_t kc_hid_query_battery(kc_hid_session_t *session,
         session->active_link == KC_LINK_BLE &&
         session->cached_ble_path[0] != L'\0') {
         if (kc_try_ble_gatt_fallback(session, debug, debug_stream, out_pct)) {
+            session->next_fallback_probe_ms = 0ULL;
             return KC_HID_OK;
         }
         kc_hid_session_invalidate(session);
@@ -966,7 +1092,7 @@ kc_hid_status_t kc_hid_query_battery(kc_hid_session_t *session,
             session, vid, pid, interface_num, &used_cache, &open_err);
         if (h == INVALID_HANDLE_VALUE) {
             if (open_err == KC_HID_NOT_FOUND && pid == 0U && interface_num < 0 &&
-                kc_try_any_fallback(session, vid, debug, debug_stream, out_pct)) {
+                kc_try_any_fallback_throttled(session, vid, debug, debug_stream, out_pct)) {
                 return KC_HID_OK;
             }
             return open_err;
@@ -978,6 +1104,7 @@ kc_hid_status_t kc_hid_query_battery(kc_hid_session_t *session,
         CloseHandle(h);
 
         if (st == KC_HID_OK) {
+            session->next_fallback_probe_ms = 0ULL;
             if (session->has_info) {
                 session->active_link = kc_infer_hid_link(&session->cached_info);
             }
@@ -994,7 +1121,7 @@ kc_hid_status_t kc_hid_query_battery(kc_hid_session_t *session,
         if (st == KC_HID_TIMEOUT && pid == 0U && interface_num < 0 &&
             session->has_info && session->cached_info.pid == KEYCHRON_RECEIVER_PID &&
             !kc_is_cancelled(cancel_event) &&
-            kc_try_any_fallback(session, vid, debug, debug_stream, out_pct)) {
+            kc_try_any_fallback_throttled(session, vid, debug, debug_stream, out_pct)) {
             return KC_HID_OK;
         }
         return st;

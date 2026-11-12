@@ -267,7 +267,12 @@ HICON kc_icon_cache_get(kc_icon_cache_t *cache,
     for (size_t i = 0; i < cache->count; ++i) {
         if (cache->entries[i].tone == tone &&
             strncmp(cache->entries[i].key, text, sizeof(cache->entries[i].key) - 1) == 0) {
-            return cache->entries[i].hicon;
+            kc_icon_entry_t hit = cache->entries[i];
+            if (i > 0U) {
+                memmove(&cache->entries[1], &cache->entries[0], i * sizeof(kc_icon_entry_t));
+                cache->entries[0] = hit;
+            }
+            return hit.hicon;
         }
     }
 
@@ -276,20 +281,20 @@ HICON kc_icon_cache_get(kc_icon_cache_t *cache,
         return NULL;
     }
 
-    if (cache->count < KC_ICON_CACHE_CAP) {
-        kc_icon_entry_t *slot = &cache->entries[cache->count++];
-        strncpy(slot->key, text, sizeof(slot->key) - 1);
-        slot->key[sizeof(slot->key) - 1] = '\0';
-        slot->tone = tone;
-        slot->hicon = hicon;
-    } else {
-        if (cache->entries[0].hicon) {
-            DestroyIcon(cache->entries[0].hicon);
+    if (cache->count == KC_ICON_CACHE_CAP) {
+        if (cache->entries[KC_ICON_CACHE_CAP - 1U].hicon) {
+            DestroyIcon(cache->entries[KC_ICON_CACHE_CAP - 1U].hicon);
         }
-        strncpy(cache->entries[0].key, text, sizeof(cache->entries[0].key) - 1);
-        cache->entries[0].key[sizeof(cache->entries[0].key) - 1] = '\0';
-        cache->entries[0].tone = tone;
-        cache->entries[0].hicon = hicon;
+        cache->count--;
     }
+    if (cache->count > 0U) {
+        memmove(&cache->entries[1], &cache->entries[0], cache->count * sizeof(kc_icon_entry_t));
+    }
+    kc_icon_entry_t *slot = &cache->entries[0];
+    strncpy(slot->key, text, sizeof(slot->key) - 1);
+    slot->key[sizeof(slot->key) - 1] = '\0';
+    slot->tone = tone;
+    slot->hicon = hicon;
+    cache->count++;
     return hicon;
 }

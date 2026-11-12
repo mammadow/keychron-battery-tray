@@ -170,6 +170,8 @@ static void test_backoff_and_clamps(void) {
     KC_CHECK(kc_next_wait_ms(&st) == 300U * 1000U);
     kc_poll_state_record_failure(&st);
     KC_CHECK(kc_next_wait_ms(&st) == 300U * 1000U);
+    KC_CHECK(kc_next_wait_ms_for_wake(&st, 30U * 60U * 1000U, false) == 300U * 1000U);
+    KC_CHECK(kc_next_wait_ms_for_wake(&st, 30U * 60U * 1000U, true) == 30U * 60U * 1000U);
 }
 
 static void test_low_battery_hysteresis_and_charging(void) {

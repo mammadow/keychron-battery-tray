@@ -397,7 +397,8 @@ static DWORD WINAPI kc_worker_proc(LPVOID param) {
             }
         }
         uint32_t normal_ms = app->settings.poll_minutes * 60U * 1000U;
-        uint32_t wait_ms = kc_next_wait_ms_for(&app->poll_state, normal_ms);
+        uint32_t wait_ms = kc_next_wait_ms_for_wake(
+            &app->poll_state, normal_ms, app->raw_watch_armed);
         LeaveCriticalSection(&app->state_lock);
 
         if (epoch_match) {
@@ -764,6 +765,9 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
 
     switch (cmd) {
         case IDM_REFRESH:
+            EnterCriticalSection(&app->state_lock);
+            app->hid_session.next_fallback_probe_ms = 0ULL;
+            LeaveCriticalSection(&app->state_lock);
             kc_request_refresh(app, false);
             break;
         case IDM_COPY_DIAG:
@@ -832,9 +836,16 @@ static bool kc_is_relevant_hid_event(const kc_tray_app_t *app, LPARAM lparam) {
 }
 
 static void kc_set_raw_mouse_watch(kc_tray_app_t *app, bool enable) {
-    if (!app || !app->hwnd || app->raw_watch_armed == enable) {
+    if (!app || !app->hwnd) {
         return;
     }
+    EnterCriticalSection(&app->state_lock);
+    bool already = (app->raw_watch_armed == enable);
+    LeaveCriticalSection(&app->state_lock);
+    if (already) {
+        return;
+    }
+
     RAWINPUTDEVICE rid;
     memset(&rid, 0, sizeof(rid));
     rid.usUsagePage = 0x01U; /* HID_USAGE_PAGE_GENERIC */
@@ -843,7 +854,9 @@ static void kc_set_raw_mouse_watch(kc_tray_app_t *app, bool enable) {
     rid.hwndTarget = enable ? app->hwnd : NULL;
 
     if (RegisterRawInputDevices(&rid, 1U, sizeof(rid))) {
+        EnterCriticalSection(&app->state_lock);
         app->raw_watch_armed = enable;
+        LeaveCriticalSection(&app->state_lock);
     }
 }
 
@@ -906,6 +919,9 @@ static LRESULT CALLBACK kc_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
     switch (msg) {
         case WM_TRAY_CALLBACK:
             if (lparam == WM_LBUTTONUP) {
+                EnterCriticalSection(&app->state_lock);
+                app->hid_session.next_fallback_probe_ms = 0ULL;
+                LeaveCriticalSection(&app->state_lock);
                 kc_request_refresh(app, false);
             } else if (lparam == WM_RBUTTONUP) {
                 kc_show_context_menu(app);

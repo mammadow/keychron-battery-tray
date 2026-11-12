@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define KC_ICON_CACHE_CAP 256U
+#define KC_ICON_CACHE_CAP 16U
 
 typedef enum kc_icon_tone {
     KC_TONE_NORMAL = 0,

@@ -151,6 +151,14 @@ uint32_t kc_next_wait_ms(const kc_poll_state_t *st);
 /** Return milliseconds until next poll using configurable steady interval (clamped >= 10s). */
 uint32_t kc_next_wait_ms_for(const kc_poll_state_t *st, uint32_t normal_interval_ms);
 
+/**
+ * Return milliseconds until next poll, scaling prolonged sleep retries up to
+ * normal_interval_ms once Raw Input mouse wake is actively armed (>= 5 misses).
+ */
+uint32_t kc_next_wait_ms_for_wake(const kc_poll_state_t *st,
+                                   uint32_t normal_interval_ms,
+                                   bool raw_wake_armed);
+
 /** Return true if tray icon should display error ("!") rather than last_pct or "--". */
 bool kc_should_show_error_glyph(const kc_poll_state_t *st);
 
