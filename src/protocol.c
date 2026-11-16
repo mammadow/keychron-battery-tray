@@ -895,3 +895,177 @@ bool kc_check_cal_due_alert(const kc_poll_state_t *poll,
     }
     return false;
 }
+
+static bool kc_parse_u32_part(const char **p_cur, uint32_t *out_val) {
+    const char *p = *p_cur;
+    if (!p || *p < '0' || *p > '9') {
+        return false;
+    }
+    uint64_t acc = 0ULL;
+    while (*p >= '0' && *p <= '9') {
+        acc = acc * 10ULL + (uint64_t)(*p - '0');
+        if (acc > 999999ULL) {
+            return false;
+        }
+        p++;
+    }
+    *out_val = (uint32_t)acc;
+    *p_cur = p;
+    return true;
+}
+
+bool kc_parse_semver(const char *s, kc_semver_t *out) {
+    if (!s || !out) {
+        return false;
+    }
+    if (*s == 'v' || *s == 'V') {
+        s++;
+    }
+    uint32_t maj = 0U, min = 0U, pat = 0U;
+    if (!kc_parse_u32_part(&s, &maj) || *s != '.') {
+        return false;
+    }
+    s++;
+    if (!kc_parse_u32_part(&s, &min) || *s != '.') {
+        return false;
+    }
+    s++;
+    if (!kc_parse_u32_part(&s, &pat) || *s != '\0') {
+        return false;
+    }
+    out->major = maj;
+    out->minor = min;
+    out->patch = pat;
+    return true;
+}
+
+int kc_compare_semver(kc_semver_t a, kc_semver_t b) {
+    if (a.major != b.major) return (a.major < b.major) ? -1 : 1;
+    if (a.minor != b.minor) return (a.minor < b.minor) ? -1 : 1;
+    if (a.patch != b.patch) return (a.patch < b.patch) ? -1 : 1;
+    return 0;
+}
+
+static bool kc_is_hex64(const char *s, char out_lower[65]) {
+    if (!s || strlen(s) != 64U) {
+        return false;
+    }
+    for (size_t i = 0; i < 64U; ++i) {
+        char c = s[i];
+        if (c >= '0' && c <= '9') {
+            out_lower[i] = c;
+        } else if (c >= 'a' && c <= 'f') {
+            out_lower[i] = c;
+        } else if (c >= 'A' && c <= 'F') {
+            out_lower[i] = (char)(c + ('a' - 'A'));
+        } else {
+            return false;
+        }
+    }
+    out_lower[64] = '\0';
+    return true;
+}
+
+static bool kc_read_json_str(const char *json, size_t len, size_t *pos, char *dst, size_t cap) {
+    size_t i = *pos;
+    if (i >= len || json[i] != '"') {
+        return false;
+    }
+    i++;
+    size_t out_n = 0U;
+    while (i < len) {
+        char c = json[i++];
+        if (c == '"') {
+            dst[out_n] = '\0';
+            *pos = i;
+            return true;
+        }
+        if (c == '\\') {
+            if (i >= len) return false;
+            c = json[i++];
+        }
+        if ((unsigned char)c < 0x20U || out_n + 1U >= cap) {
+            return false;
+        }
+        dst[out_n++] = c;
+    }
+    return false;
+}
+
+bool kc_parse_scoop_manifest(const char *json, size_t len, kc_release_info_t *out) {
+    if (!json || !out) {
+        return false;
+    }
+    kc_release_info_t tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    bool has_ver = false;
+    bool has_url = false;
+    bool has_hash = false;
+
+    size_t i = 0U;
+    while (i < len) {
+        if (json[i] != '"') {
+            i++;
+            continue;
+        }
+        char key[64];
+        if (!kc_read_json_str(json, len, &i, key, sizeof(key))) {
+            i++;
+            continue;
+        }
+        size_t j = i;
+        while (j < len && (json[j] == ' ' || json[j] == '\t' || json[j] == '\r' || json[j] == '\n')) {
+            j++;
+        }
+        if (j >= len || json[j] != ':') {
+            i = j;
+            continue;
+        }
+        j++;
+        while (j < len && (json[j] == ' ' || json[j] == '\t' || json[j] == '\r' || json[j] == '\n')) {
+            j++;
+        }
+        if (j >= len || json[j] != '"') {
+            i = j;
+            continue;
+        }
+
+        char val[512];
+        if (!kc_read_json_str(json, len, &j, val, sizeof(val))) {
+            i = j;
+            continue;
+        }
+        i = j;
+
+        if (!has_ver && strcmp(key, "version") == 0) {
+            kc_semver_t sv;
+            if (kc_parse_semver(val, &sv)) {
+                tmp.version = sv;
+                snprintf(tmp.version_str, sizeof(tmp.version_str), "%u.%u.%u",
+                         (unsigned)sv.major, (unsigned)sv.minor, (unsigned)sv.patch);
+                has_ver = true;
+            }
+        } else if (!has_url && strcmp(key, "url") == 0) {
+            size_t pfx_len = strlen(KC_RELEASE_URL_PREFIX);
+            size_t vlen = strlen(val);
+            if (strncmp(val, KC_RELEASE_URL_PREFIX, pfx_len) == 0 &&
+                vlen >= 4U && strcmp(val + vlen - 4U, ".zip") == 0 &&
+                strchr(val, '$') == NULL) {
+                snprintf(tmp.download_url, sizeof(tmp.download_url), "%s", val);
+                has_url = true;
+            }
+        } else if (!has_hash && strcmp(key, "hash") == 0) {
+            char norm[65];
+            if (kc_is_hex64(val, norm)) {
+                memcpy(tmp.sha256_hex, norm, 65U);
+                has_hash = true;
+            }
+        }
+
+        if (has_ver && has_url && has_hash) {
+            *out = tmp;
+            return true;
+        }
+    }
+    return false;
+}

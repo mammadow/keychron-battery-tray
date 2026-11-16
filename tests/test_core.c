@@ -476,11 +476,63 @@ static void test_battery_protector_and_calibration(void) {
     KC_CHECK(days == 0U && cyc_x10 == 0U);
 }
 
+static void test_semver_and_manifest_parser(void) {
+    kc_semver_t a, b;
+    KC_CHECK(kc_parse_semver("1.5.0", &a) && a.major == 1U && a.minor == 5U && a.patch == 0U);
+    KC_CHECK(kc_parse_semver("v1.10.2", &b) && b.major == 1U && b.minor == 10U && b.patch == 2U);
+    KC_CHECK(kc_compare_semver(a, b) < 0);
+    KC_CHECK(kc_compare_semver(b, a) > 0);
+    KC_CHECK(kc_compare_semver(a, a) == 0);
+    KC_CHECK(!kc_parse_semver("1.5", &a));
+    KC_CHECK(!kc_parse_semver("1.5.0-beta", &a));
+    KC_CHECK(!kc_parse_semver("-1.0.0", &a));
+
+    const char *sample_json =
+        "{\n"
+        "  \"version\": \"1.6.0\",\n"
+        "  \"architecture\": {\n"
+        "    \"64bit\": {\n"
+        "      \"url\": \"https://github.com/mammadow/keychron-battery-tray/releases/download/v1.6.0/keychron-battery-win64-v1.6.0.zip\",\n"
+        "      \"hash\": \"6AF099449FC90802299A1A1DC1E9F35281B1C21E96CB9BFDD7CB7238BA738C83\"\n"
+        "    }\n"
+        "  },\n"
+        "  \"autoupdate\": {\n"
+        "    \"architecture\": {\n"
+        "      \"64bit\": {\n"
+        "        \"url\": \"https://github.com/mammadow/keychron-battery-tray/releases/download/v$version/keychron-battery-win64-v$version.zip\",\n"
+        "        \"hash\": { \"url\": \"$baseurl/SHA256SUMS.txt\" }\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "}\n";
+    kc_release_info_t rel;
+    KC_CHECK(kc_parse_scoop_manifest(sample_json, strlen(sample_json), &rel));
+    KC_CHECK(rel.version.major == 1U && rel.version.minor == 6U && rel.version.patch == 0U);
+    KC_CHECK(strcmp(rel.version_str, "1.6.0") == 0);
+    KC_CHECK(strcmp(rel.download_url,
+                    "https://github.com/mammadow/keychron-battery-tray/releases/download/v1.6.0/keychron-battery-win64-v1.6.0.zip") == 0);
+    KC_CHECK(strcmp(rel.sha256_hex,
+                    "6af099449fc90802299a1a1dc1e9f35281b1c21e96cb9bfdd7cb7238ba738c83") == 0);
+
+    /* Reject untrusted download host or placeholder template URLs or non-64-hex hashes. */
+    const char *evil_host =
+        "{\"version\":\"9.9.9\",\"url\":\"https://evil.example/payload.zip\","
+        "\"hash\":\"6af099449fc90802299a1a1dc1e9f35281b1c21e96cb9bfdd7cb7238ba738c83\"}";
+    KC_CHECK(!kc_parse_scoop_manifest(evil_host, strlen(evil_host), &rel));
+
+    const char *bad_hash =
+        "{\"version\":\"9.9.9\","
+        "\"url\":\"https://github.com/mammadow/keychron-battery-tray/releases/download/v9.9.9/a.zip\","
+        "\"hash\":\"REPLACE_WITH_RELEASE_ZIP_SHA256\"}";
+    KC_CHECK(!kc_parse_scoop_manifest(bad_hash, strlen(bad_hash), &rel));
+}
+
 int main(void) {
     test_build_and_parse_report();
     test_recv_state_and_model_lookup();
     test_charging_cadence_full_alert_and_drain();
     test_battery_protector_and_calibration();
+    test_semver_and_manifest_parser();
     test_path_helpers();
     test_score_candidate_ranking();
     test_backoff_and_clamps();

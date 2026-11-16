@@ -323,4 +323,31 @@ bool kc_check_cal_due_alert(const kc_poll_state_t *poll,
                             kc_protector_runtime_t *rt,
                             uint64_t now_unix);
 
+#define KC_RELEASE_URL_PREFIX "https://github.com/mammadow/keychron-battery-tray/releases/download/"
+
+typedef struct kc_semver {
+    uint32_t major;
+    uint32_t minor;
+    uint32_t patch;
+} kc_semver_t;
+
+typedef struct kc_release_info {
+    kc_semver_t version;
+    char version_str[32];
+    char download_url[512];
+    char sha256_hex[65];
+} kc_release_info_t;
+
+/** Parse strict A.B.C semver (with optional leading 'v'). */
+bool kc_parse_semver(const char *s, kc_semver_t *out);
+
+/** Compare two semvers: returns -1 if a < b, 0 if a == b, +1 if a > b. */
+int kc_compare_semver(kc_semver_t a, kc_semver_t b);
+
+/**
+ * Parse keychron-battery-tray.json release manifest cleanly, extracting concrete 64-bit
+ * download URL + 64-hex SHA-256 digest while skipping template/autoupdate entries.
+ */
+bool kc_parse_scoop_manifest(const char *json, size_t len, kc_release_info_t *out);
+
 #endif /* KEYCHRON_PROTOCOL_H */

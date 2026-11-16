@@ -2,6 +2,7 @@
 #include "glyph_blit.h"
 #include "hid_win.h"
 #include "settings_win.h"
+#include "updater_win.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -207,6 +208,23 @@ int main(void) {
 
     kc_icon_cache_destroy(&cache);
     KC_CHECK(cache.count == 0U);
+
+    /* Verify lazy bcrypt.dll SHA-256 computation against NIST vector "abc". */
+    wchar_t tmp_dir[MAX_PATH];
+    wchar_t tmp_file[MAX_PATH];
+    DWORD tlen = GetTempPathW(MAX_PATH, tmp_dir);
+    KC_CHECK(tlen > 0U && tlen < MAX_PATH - 32U);
+    _snwprintf(tmp_file, MAX_PATH, L"%ls\\kc_sha_test_%lu.bin", tmp_dir, (unsigned long)GetCurrentProcessId());
+    tmp_file[MAX_PATH - 1] = L'\0';
+    HANDLE hf = CreateFileW(tmp_file, GENERIC_WRITE, 0U, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    KC_CHECK(hf != INVALID_HANDLE_VALUE);
+    DWORD wr = 0U;
+    KC_CHECK(WriteFile(hf, "abc", 3U, &wr, NULL) && wr == 3U);
+    CloseHandle(hf);
+    char sha[65];
+    KC_CHECK(kc_updater_sha256_file(tmp_file, sha));
+    DeleteFileW(tmp_file);
+    KC_CHECK(strcmp(sha, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") == 0);
 
     printf("All keychron Windows GDI icon tests passed (detected tray size=%d).\n", size);
     return 0;

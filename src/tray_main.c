@@ -2,6 +2,7 @@
 #include "icon_render.h"
 #include "protocol.h"
 #include "settings_win.h"
+#include "updater_win.h"
 #include "version.h"
 
 #include <dbt.h>
@@ -11,11 +12,14 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 
-#define WM_TRAY_CALLBACK      (WM_USER + 11)
-#define WM_APP_POLL_RESULT    (WM_APP + 1)
+#define WM_TRAY_CALLBACK           (WM_USER + 11)
+#define WM_APP_POLL_RESULT         (WM_APP + 1)
+#define WM_APP_UPDATE_CHECK_DONE   (WM_APP + 2)
+#define WM_APP_UPDATE_INSTALL_DONE (WM_APP + 3)
 
 #define IDI_APP_ICON          101U
 #define TRAY_ICON_UID         1U
@@ -32,6 +36,7 @@
 #define IDM_VERSION           1005U
 #define IDM_COPY_DIAG         1006U
 #define IDM_STATUS_EST        1007U
+#define IDM_CHECK_UPDATES     1008U
 
 #define KC_WIDE2(x)           L##x
 #define KC_WIDE(x)            KC_WIDE2(x)
@@ -72,6 +77,12 @@ typedef struct kc_raw_dev_entry {
     HANDLE hdevice;
     bool is_match;
 } kc_raw_dev_entry_t;
+
+typedef enum kc_upd_ui_state {
+    KC_UPD_IDLE = 0,
+    KC_UPD_CHECKING = 1,
+    KC_UPD_INSTALLING = 2
+} kc_upd_ui_state_t;
 
 typedef struct kc_tray_app {
     HINSTANCE hinst;
@@ -121,6 +132,10 @@ typedef struct kc_tray_app {
     bool raw_watch_armed;
     kc_raw_dev_entry_t raw_cache[KC_RAW_CACHE_CAP];
     size_t raw_cache_count;
+
+    bool menu_open;
+    kc_upd_ui_state_t update_ui_state;
+    HANDLE update_thread;
 } kc_tray_app_t;
 
 static kc_tray_app_t g_app;
@@ -517,7 +532,20 @@ static void kc_sync_tray_icon(kc_tray_app_t *app, bool force_add) {
         if (want_toast) {
             nid.uFlags |= NIF_INFO;
         }
-        Shell_NotifyIconW(NIM_MODIFY, &nid);
+        if (!Shell_NotifyIconW(NIM_MODIFY, &nid)) {
+            /* Explorer restart or shell notification reset dropped our icon; re-register. */
+            app->tray_added = false;
+            nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+            if (want_toast) {
+                nid.uFlags |= NIF_INFO;
+            }
+            if (Shell_NotifyIconW(NIM_ADD, &nid)) {
+                app->tray_added = true;
+            } else {
+                kc_rollback_toast(app, toast);
+                return;
+            }
+        }
     }
 
     app->last_hicon = hicon;
@@ -526,6 +554,101 @@ static void kc_sync_tray_icon(kc_tray_app_t *app, bool force_add) {
     app->last_glyph[sizeof(app->last_glyph) - 1] = '\0';
     wcsncpy(app->last_tip, tip, 127);
     app->last_tip[127] = L'\0';
+}
+
+static void kc_show_custom_balloon(kc_tray_app_t *app,
+                                   DWORD info_flags,
+                                   const wchar_t *title,
+                                   const wchar_t *body) {
+    if (!app || !app->hwnd) {
+        return;
+    }
+    NOTIFYICONDATAW nid;
+    memset(&nid, 0, sizeof(nid));
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = app->hwnd;
+    nid.uID = TRAY_ICON_UID;
+    nid.uCallbackMessage = WM_TRAY_CALLBACK;
+    nid.hIcon = app->last_hicon;
+    wcsncpy(nid.szTip, app->last_tip[0] ? app->last_tip : L"Keychron Battery Tray", 127);
+    nid.szTip[127] = L'\0';
+    nid.dwInfoFlags = info_flags | NIIF_RESPECT_QUIET_TIME;
+    wcsncpy(nid.szInfoTitle, title ? title : L"Keychron Battery Tray", 63);
+    nid.szInfoTitle[63] = L'\0';
+    wcsncpy(nid.szInfo, body ? body : L"", 255);
+    nid.szInfo[255] = L'\0';
+
+    if (app->tray_added) {
+        nid.uFlags = NIF_INFO | NIF_SHOWTIP;
+        if (Shell_NotifyIconW(NIM_MODIFY, &nid)) {
+            return;
+        }
+        app->tray_added = false;
+    }
+    if (nid.hIcon) {
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP | NIF_INFO;
+        if (Shell_NotifyIconW(NIM_ADD, &nid)) {
+            app->tray_added = true;
+        }
+    }
+}
+
+static DWORD WINAPI kc_update_check_proc(LPVOID param) {
+    kc_tray_app_t *app = (kc_tray_app_t *)param;
+    kc_update_check_result_t res = kc_updater_check_latest(KC_APP_VERSION, app->stop_event);
+    kc_update_check_result_t *heap_res =
+        (kc_update_check_result_t *)calloc(1, sizeof(kc_update_check_result_t));
+    if (!heap_res) {
+        return 0;
+    }
+    *heap_res = res;
+    if (!PostMessageW(app->hwnd, WM_APP_UPDATE_CHECK_DONE, 0, (LPARAM)heap_res)) {
+        free(heap_res);
+    }
+    return 0;
+}
+
+static DWORD WINAPI kc_update_install_proc(LPVOID param) {
+    kc_release_info_t *rel_in = (kc_release_info_t *)param;
+    kc_release_info_t rel = *rel_in;
+    free(rel_in);
+
+    kc_update_install_result_t res = kc_updater_prepare_install(&rel, g_app.stop_event);
+    kc_update_install_result_t *heap_res =
+        (kc_update_install_result_t *)calloc(1, sizeof(kc_update_install_result_t));
+    if (!heap_res) {
+        if (res.ok) {
+            kc_updater_cleanup_dir(res.work_dir);
+        }
+        return 0;
+    }
+    *heap_res = res;
+    if (!PostMessageW(g_app.hwnd, WM_APP_UPDATE_INSTALL_DONE, 0, (LPARAM)heap_res)) {
+        if (heap_res->ok) {
+            kc_updater_cleanup_dir(heap_res->work_dir);
+        }
+        free(heap_res);
+    }
+    return 0;
+}
+
+static void kc_start_update_check(kc_tray_app_t *app) {
+    if (!app || app->update_ui_state != KC_UPD_IDLE) {
+        return;
+    }
+    if (app->update_thread) {
+        CloseHandle(app->update_thread);
+        app->update_thread = NULL;
+    }
+    app->update_ui_state = KC_UPD_CHECKING;
+    HANDLE th = CreateThread(NULL, 0, kc_update_check_proc, app, 0, NULL);
+    if (!th) {
+        app->update_ui_state = KC_UPD_IDLE;
+        kc_show_custom_balloon(app, NIIF_WARNING, L"Update Check Failed",
+                               L"Could not start update background worker.");
+        return;
+    }
+    app->update_thread = th;
 }
 
 static void kc_request_refresh(kc_tray_app_t *app, bool reset_cache) {
@@ -1063,12 +1186,20 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
                 L"Run at Windows startup");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, IDM_COPY_DIAG, L"Copy diagnostics");
+    if (app->update_ui_state == KC_UPD_CHECKING) {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_CHECK_UPDATES, L"Checking for updates...");
+    } else if (app->update_ui_state == KC_UPD_INSTALLING) {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_CHECK_UPDATES, L"Downloading update...");
+    } else {
+        AppendMenuW(menu, MF_STRING, IDM_CHECK_UPDATES, L"Check for updates...");
+    }
     AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_VERSION, L"Keychron Battery Tray v" KC_WIDE(KC_APP_VERSION));
     AppendMenuW(menu, MF_STRING, IDM_QUIT, L"Quit");
 
     POINT pt;
     GetCursorPos(&pt);
     SetForegroundWindow(app->hwnd);
+    app->menu_open = true;
     UINT cmd = (UINT)TrackPopupMenuEx(
         menu,
         TPM_RIGHTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
@@ -1076,6 +1207,7 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
         pt.y,
         app->hwnd,
         NULL);
+    app->menu_open = false;
     PostMessageW(app->hwnd, WM_NULL, 0, 0);
     DestroyMenu(menu);
 
@@ -1167,6 +1299,9 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
             break;
         case IDM_COPY_DIAG:
             kc_copy_diagnostics(app);
+            break;
+        case IDM_CHECK_UPDATES:
+            kc_start_update_check(app);
             break;
         case IDM_AUTOSTART:
             kc_autostart_set(!kc_autostart_is_enabled(),
@@ -1313,6 +1448,9 @@ static LRESULT CALLBACK kc_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
 
     switch (msg) {
         case WM_TRAY_CALLBACK:
+            if (app->menu_open) {
+                return 0;
+            }
             if (lparam == WM_LBUTTONUP) {
                 EnterCriticalSection(&app->state_lock);
                 app->hid_session.next_fallback_probe_ms = 0ULL;
@@ -1322,6 +1460,94 @@ static LRESULT CALLBACK kc_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
                 kc_show_context_menu(app);
             }
             return 0;
+
+        case WM_APP_UPDATE_CHECK_DONE: {
+            kc_update_check_result_t *heap_res = (kc_update_check_result_t *)lparam;
+            if (app->update_thread) {
+                CloseHandle(app->update_thread);
+                app->update_thread = NULL;
+            }
+            app->update_ui_state = KC_UPD_IDLE;
+            if (!heap_res) {
+                return 0;
+            }
+            kc_update_check_result_t res = *heap_res;
+            free(heap_res);
+
+            if (!res.ok) {
+                kc_show_custom_balloon(app, NIIF_WARNING, L"Update Check Failed", res.error);
+                return 0;
+            }
+            if (!res.update_available) {
+                kc_show_custom_balloon(
+                    app, NIIF_INFO, L"Keychron Battery Tray",
+                    L"You're up to date (v" KC_WIDE(KC_APP_VERSION) L").");
+                return 0;
+            }
+
+            wchar_t ver_w[32] = L"";
+            MultiByteToWideChar(CP_UTF8, 0, res.release.version_str, -1, ver_w, 32);
+            wchar_t prompt[320];
+            _snwprintf(prompt, 320,
+                       L"Keychron Battery Tray v%ls is available (you have v%ls).\n\n"
+                       L"Download, verify SHA-256, and update automatically?",
+                       ver_w, KC_WIDE(KC_APP_VERSION));
+            prompt[319] = L'\0';
+
+            app->menu_open = true;
+            int ans = MessageBoxW(hwnd, prompt, L"Keychron Battery Tray Update",
+                                  MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND);
+            app->menu_open = false;
+            if (ans == IDYES) {
+                kc_release_info_t *rel_arg =
+                    (kc_release_info_t *)calloc(1, sizeof(kc_release_info_t));
+                if (!rel_arg) {
+                    kc_show_custom_balloon(app, NIIF_ERROR, L"Update Failed", L"Out of memory.");
+                    return 0;
+                }
+                *rel_arg = res.release;
+                app->update_ui_state = KC_UPD_INSTALLING;
+                HANDLE th = CreateThread(NULL, 0, kc_update_install_proc, rel_arg, 0, NULL);
+                if (!th) {
+                    free(rel_arg);
+                    app->update_ui_state = KC_UPD_IDLE;
+                    kc_show_custom_balloon(app, NIIF_ERROR, L"Update Failed",
+                                           L"Could not start download worker.");
+                    return 0;
+                }
+                app->update_thread = th;
+                kc_show_custom_balloon(app, NIIF_INFO, L"Downloading Update",
+                                       L"Downloading and verifying SHA-256 checksum...");
+            }
+            return 0;
+        }
+
+        case WM_APP_UPDATE_INSTALL_DONE: {
+            kc_update_install_result_t *heap_res = (kc_update_install_result_t *)lparam;
+            if (app->update_thread) {
+                CloseHandle(app->update_thread);
+                app->update_thread = NULL;
+            }
+            app->update_ui_state = KC_UPD_IDLE;
+            if (!heap_res) {
+                return 0;
+            }
+            kc_update_install_result_t res = *heap_res;
+            free(heap_res);
+
+            if (!res.ok) {
+                kc_show_custom_balloon(app, NIIF_ERROR, L"Update Failed", res.error);
+                return 0;
+            }
+            if (!kc_updater_launch_script(res.script_path)) {
+                kc_updater_cleanup_dir(res.work_dir);
+                kc_show_custom_balloon(app, NIIF_ERROR, L"Update Failed",
+                                       L"Could not launch update installer script.");
+                return 0;
+            }
+            DestroyWindow(hwnd);
+            return 0;
+        }
 
         case WM_APP_POLL_RESULT: {
             bool arm_raw_watch = false;
@@ -1557,6 +1783,10 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE hprev, PWSTR cmdline, int show) {
     }
 
     SetEvent(g_app.stop_event);
+    if (g_app.update_thread) {
+        WaitForSingleObject(g_app.update_thread, 2000);
+        CloseHandle(g_app.update_thread);
+    }
     if (g_app.worker_thread) {
         WaitForSingleObject(g_app.worker_thread, 2000);
         CloseHandle(g_app.worker_thread);

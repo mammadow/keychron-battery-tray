@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(keychron_battery VERSION 1.5.0 LANGUAGES C)
+project(keychron_battery VERSION 1.6.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -60,6 +60,7 @@ add_library(keychron_win STATIC
     src/hid_win.c
     src/icon_render.c
     src/settings_win.c
+    src/updater_win.c
 )
 target_include_directories(keychron_win PUBLIC src)
 target_compile_options(keychron_win PRIVATE ${KC_WARN_FLAGS} ${KC_OPT_FLAGS})

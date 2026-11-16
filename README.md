@@ -6,7 +6,7 @@
 
 Native Windows system tray battery indicator and CLI diagnostic utility for Keychron wireless mice using the vendor HID protocol (confirmed with the Keychron Ultra-Link 8K receiver `VID 0x3434 / PID 0xD028` and Keychron M7 8K `0xD056`, USB interface `4`, Usage Page `0xFFC1`), with automatic fallbacks for standard HID Battery Strength (`0x06`/`0x20`) and Bluetooth LE Battery Service (`0x180F`/`0x2A19`).
 
-Written in C17 directly against Win32, Windows HID, and CfgMgr32 APIs (`hid.dll`, `cfgmgr32.dll`, `shell32.dll`, `gdi32.dll`, `advapi32.dll`, loading `BluetoothApis.dll` on demand only when BLE fallback is active) for zero external runtime dependencies, compact binaries (`71.0 KB` tray / `42.0 KB` CLI), ~4.6 MB private memory footprint (~12.65 MB working set), and zero idle CPU wakeups.
+Written in C17 directly against Win32, Windows HID, and CfgMgr32 APIs (`hid.dll`, `cfgmgr32.dll`, `shell32.dll`, `gdi32.dll`, `advapi32.dll`, loading `BluetoothApis.dll`, `winhttp.dll`, and `bcrypt.dll` on demand only when BLE fallback or updates are used) for zero external runtime dependencies, compact binaries (`86.0 KB` tray / `43.5 KB` CLI), ~4.6 MB private memory footprint (~12.7 MB working set), and zero idle CPU wakeups.
 
 ## Tray Icon States
 
@@ -29,10 +29,10 @@ Measured live on Windows x64 (`keychron-battery-tray.exe`, Ultra-Link 8K `2.4GHz
 | **Idle CPU** | **`0.00%`** (`0.00 ms` / 2s) | Blocked on `GetMessageW` + `WaitForMultipleObjects`; zero timer/busy loops |
 | **Startup CPU** | **`~47 ms`** (`46.9 ms`) | Cold launch, initial HID poll, paired PID lookup, and first `HICON` render |
 | **Private RAM** | **`~4.6 MB`** (`4.57 MB`) | Actual per-process private memory commit |
-| **Working Set** | **`~12.65 MB`** (`12.65 MB`) | Includes shared Windows `SHELL32.dll` / `GDI32` / `CfgMgr32` pages |
+| **Working Set** | **`~12.7 MB`** (`12.66 MB`) | Includes shared Windows `SHELL32.dll` / `GDI32` / `CfgMgr32` pages |
 | **Handles & GDI** | **`128` handles** | `17` GDI objects / `9` USER objects (`16`-slot MRU icon cache caps GDI growth) |
-| **Loaded DLLs** | **`29` DLLs** | Uses `CfgMgr32`; avoids `SETUPAPI.dll`, `CRYPT32.dll`, and lazy-loads `BluetoothApis.dll` |
-| **Binary Size** | **`71.0 KB` / `42.0 KB`** | `keychron-battery-tray.exe` (`71.0 KB`) + `keychron-battery.exe` (`42.0 KB`) |
+| **Loaded DLLs** | **`29` DLLs** | Uses `CfgMgr32`; avoids `SETUPAPI.dll`, `CRYPT32.dll`, lazy-loads `BluetoothApis.dll`, `winhttp.dll`, `bcrypt.dll` |
+| **Binary Size** | **`86.0 KB` / `43.5 KB`** | `keychron-battery-tray.exe` (`86.0 KB`) + `keychron-battery.exe` (`43.5 KB`) |
 
 ## Features
 
@@ -45,7 +45,7 @@ Measured live on Windows x64 (`keychron-battery-tray.exe`, Ultra-Link 8K `2.4GHz
 - **Event-driven wakeups & instant exit**: uses `WM_POWERBROADCAST` resume, `GUID_CONSOLE_DISPLAY_STATE` Modern Standby wake (60s cooldown), VID-filtered `WM_DEVICECHANGE` hotplug (`1.5s` settle on USB unplug), on-demand Raw Input mouse wake (`VID_3434` only — ignores touchpads and other mice, and scales prolonged sleep backoff up to your `Poll interval` while armed), `TaskbarCreated` recovery, and `CancelIoEx` cancellation on quit.
 - **Per-Monitor V2 DPI & theme aware**: adapts live to `WM_DPICHANGED`, `WM_DISPLAYCHANGE`, and `ImmersiveColorSet` (`SystemUsesLightTheme`).
 - **Lightweight `CfgMgr32` enumeration & caching**: avoids loading `SETUPAPI.dll` or `BluetoothApis.dll` in USB/2.4GHz sessions and caches both vendor HID interfaces and BLE GATT `0x180F` paths across polls and `--watch` runs.
-- **Persisted tray preferences**: stores settings (`PollMinutes`, `LowAlertPct`, `NotifyFull`, `TargetPid`, `TargetInterface`) and Battery Protector state (`ProtectorMode`, `ProtectorLaptopGuard`, `ProtectorCalibrating`, `ProtectorCumChargedPct`, `ProtectorLastCalUnix`, `ProtectorSnoozeUntil`) under `HKCU\Software\KeychronBatteryTray` and optional auto-start under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+- **Persisted tray preferences & self-update**: stores settings (`PollMinutes`, `LowAlertPct`, `NotifyFull`, `TargetPid`, `TargetInterface`) and Battery Protector state (`ProtectorMode`, `ProtectorLaptopGuard`, `ProtectorCalibrating`, `ProtectorCumChargedPct`, `ProtectorLastCalUnix`, `ProtectorSnoozeUntil`) under `HKCU\Software\KeychronBatteryTray`, optional auto-start under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, and lazy-loads `winhttp.dll` + `bcrypt.dll` on demand when clicking **Check for updates...** to download, SHA-256-verify, and apply GitHub Releases cleanly.
 
 ## Layout
 
@@ -106,6 +106,7 @@ Run `.\build\keychron-battery-tray.exe` (CLI target overrides `--vid`, `--pid`, 
   - **Alerts** (`Low: Off` / `Below 10%` / `Below 15%` / `Below 20%`, plus `Notify when full (100%)`)
   - **Run at Windows startup**
   - **Copy diagnostics** (copies structured JSON status to clipboard)
+  - **Check for updates...** (checks GitHub Releases, verifies SHA-256, and self-updates & relaunches cleanly)
   - **Quit**
 
 ### CLI Tool
