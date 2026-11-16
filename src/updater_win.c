@@ -219,7 +219,7 @@ static bool kc_http_fetch(const wchar_t *url,
         return false;
     }
 
-    wh->set_timeouts(h_sess, 5000, 8000, 8000, 15000);
+    wh->set_timeouts(h_sess, 15000, 15000, 15000, 30000);
 
     HINTERNET h_conn = wh->connect(h_sess, host, uc.nPort, 0U);
     if (!h_conn) {

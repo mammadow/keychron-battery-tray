@@ -632,6 +632,17 @@ static DWORD WINAPI kc_update_install_proc(LPVOID param) {
     return 0;
 }
 
+static void kc_show_update_msgbox(kc_tray_app_t *app,
+                                  HWND hwnd,
+                                  const wchar_t *text,
+                                  const wchar_t *title,
+                                  UINT flags) {
+    app->menu_open = true;
+    SetForegroundWindow(hwnd);
+    MessageBoxW(hwnd, text, title, flags | MB_SETFOREGROUND);
+    app->menu_open = false;
+}
+
 static void kc_start_update_check(kc_tray_app_t *app) {
     if (!app || app->update_ui_state != KC_UPD_IDLE) {
         return;
@@ -644,8 +655,10 @@ static void kc_start_update_check(kc_tray_app_t *app) {
     HANDLE th = CreateThread(NULL, 0, kc_update_check_proc, app, 0, NULL);
     if (!th) {
         app->update_ui_state = KC_UPD_IDLE;
-        kc_show_custom_balloon(app, NIIF_WARNING, L"Update Check Failed",
-                               L"Could not start update background worker.");
+        kc_show_update_msgbox(app, app->hwnd,
+                              L"Could not start update background worker.",
+                              L"Update Check Failed",
+                              MB_OK | MB_ICONWARNING);
         return;
     }
     app->update_thread = th;
@@ -1475,13 +1488,16 @@ static LRESULT CALLBACK kc_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
             free(heap_res);
 
             if (!res.ok) {
-                kc_show_custom_balloon(app, NIIF_WARNING, L"Update Check Failed", res.error);
+                kc_show_update_msgbox(app, hwnd, res.error, L"Update Check Failed",
+                                      MB_OK | MB_ICONWARNING);
                 return 0;
             }
             if (!res.update_available) {
-                kc_show_custom_balloon(
-                    app, NIIF_INFO, L"Keychron Battery Tray",
-                    L"You're up to date (v" KC_WIDE(KC_APP_VERSION) L").");
+                kc_show_update_msgbox(
+                    app, hwnd,
+                    L"Keychron Battery Tray v" KC_WIDE(KC_APP_VERSION) L" is up to date.",
+                    L"Check for Updates",
+                    MB_OK | MB_ICONINFORMATION);
                 return 0;
             }
 
@@ -1495,6 +1511,7 @@ static LRESULT CALLBACK kc_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
             prompt[319] = L'\0';
 
             app->menu_open = true;
+            SetForegroundWindow(hwnd);
             int ans = MessageBoxW(hwnd, prompt, L"Keychron Battery Tray Update",
                                   MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND);
             app->menu_open = false;
@@ -1502,7 +1519,8 @@ static LRESULT CALLBACK kc_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
                 kc_release_info_t *rel_arg =
                     (kc_release_info_t *)calloc(1, sizeof(kc_release_info_t));
                 if (!rel_arg) {
-                    kc_show_custom_balloon(app, NIIF_ERROR, L"Update Failed", L"Out of memory.");
+                    kc_show_update_msgbox(app, hwnd, L"Out of memory.",
+                                          L"Update Failed", MB_OK | MB_ICONERROR);
                     return 0;
                 }
                 *rel_arg = res.release;
@@ -1511,8 +1529,8 @@ static LRESULT CALLBACK kc_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
                 if (!th) {
                     free(rel_arg);
                     app->update_ui_state = KC_UPD_IDLE;
-                    kc_show_custom_balloon(app, NIIF_ERROR, L"Update Failed",
-                                           L"Could not start download worker.");
+                    kc_show_update_msgbox(app, hwnd, L"Could not start download worker.",
+                                          L"Update Failed", MB_OK | MB_ICONERROR);
                     return 0;
                 }
                 app->update_thread = th;
@@ -1536,13 +1554,15 @@ static LRESULT CALLBACK kc_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
             free(heap_res);
 
             if (!res.ok) {
-                kc_show_custom_balloon(app, NIIF_ERROR, L"Update Failed", res.error);
+                kc_show_update_msgbox(app, hwnd, res.error, L"Update Failed",
+                                      MB_OK | MB_ICONERROR);
                 return 0;
             }
             if (!kc_updater_launch_script(res.script_path)) {
                 kc_updater_cleanup_dir(res.work_dir);
-                kc_show_custom_balloon(app, NIIF_ERROR, L"Update Failed",
-                                       L"Could not launch update installer script.");
+                kc_show_update_msgbox(app, hwnd,
+                                      L"Could not launch update installer script.",
+                                      L"Update Failed", MB_OK | MB_ICONERROR);
                 return 0;
             }
             DestroyWindow(hwnd);
