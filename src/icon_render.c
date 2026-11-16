@@ -195,6 +195,16 @@ static HICON kc_render_tray_icon(const char *text,
         fg_r = light_taskbar ? 205U : 255U;
         fg_g = light_taskbar ? 32U : 92U;
         fg_b = light_taskbar ? 32U : 92U;
+    } else if (tone == KC_TONE_CHARGE_SOON) {
+        /* Warm golden yellow on dark taskbars; rich high-contrast amber on light taskbars. */
+        fg_r = light_taskbar ? 168U : 255U;
+        fg_g = light_taskbar ? 108U : 212U;
+        fg_b = light_taskbar ? 0U : 59U;
+    } else if (tone == KC_TONE_CHARGE_LIMIT) {
+        /* Crisp cyan on dark taskbars; deep Windows azure on light taskbars. */
+        fg_r = light_taskbar ? 0U : 79U;
+        fg_g = light_taskbar ? 103U : 195U;
+        fg_b = light_taskbar ? 192U : 247U;
     } else if (tone == KC_TONE_CHARGING) {
         fg_r = light_taskbar ? 16U : 108U;
         fg_g = light_taskbar ? 124U : 203U;

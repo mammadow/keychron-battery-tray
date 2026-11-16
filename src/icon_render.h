@@ -11,7 +11,9 @@ typedef enum kc_icon_tone {
     KC_TONE_NORMAL = 0,
     KC_TONE_LOW = 1,
     KC_TONE_CHARGING = 2,
-    KC_TONE_STALE = 3
+    KC_TONE_STALE = 3,
+    KC_TONE_CHARGE_SOON = 4,
+    KC_TONE_CHARGE_LIMIT = 5
 } kc_icon_tone_t;
 
 typedef struct kc_icon_entry {

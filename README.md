@@ -6,15 +6,17 @@
 
 Native Windows system tray battery indicator and CLI diagnostic utility for Keychron wireless mice using the vendor HID protocol (confirmed with the Keychron Ultra-Link 8K receiver `VID 0x3434 / PID 0xD028` and Keychron M7 8K `0xD056`, USB interface `4`, Usage Page `0xFFC1`), with automatic fallbacks for standard HID Battery Strength (`0x06`/`0x20`) and Bluetooth LE Battery Service (`0x180F`/`0x2A19`).
 
-Written in C17 directly against Win32, Windows HID, and CfgMgr32 APIs (`hid.dll`, `cfgmgr32.dll`, `shell32.dll`, `gdi32.dll`, `advapi32.dll`, loading `BluetoothApis.dll` on demand only when BLE fallback is active) for zero external runtime dependencies, compact binaries (`60.5 KB` tray / `40 KB` CLI), ~4.6 MB private memory footprint (~12.6 MB working set), and zero idle CPU wakeups.
+Written in C17 directly against Win32, Windows HID, and CfgMgr32 APIs (`hid.dll`, `cfgmgr32.dll`, `shell32.dll`, `gdi32.dll`, `advapi32.dll`, loading `BluetoothApis.dll` on demand only when BLE fallback is active) for zero external runtime dependencies, compact binaries (`71.0 KB` tray / `42.0 KB` CLI), ~4.6 MB private memory footprint (~12.65 MB working set), and zero idle CPU wakeups.
 
 ## Tray Icon States
 
 | Display | Meaning |
 |---|---|
-| `45` (White / Charcoal) | Live reading matching Windows dark / light taskbar theme |
-| `45` (Green) | Charging (automatically polls every `2m`) |
-| `12` (Red) | Discharging at or below your low-battery alert threshold |
+| `45` (White / Charcoal) | Normal live reading matching Windows dark / light taskbar theme |
+| `25` (Yellow / Amber) | Recommended charge window reached (`<= 25%` Longevity / `<= 20%` Balanced) |
+| `12` (Red) | Critical low battery (`<=` your low-battery alert threshold) |
+| `45` (Green) | Charging below the recommended ceiling (or calibrating to `100%`), polls every `2m` |
+| `80` (Cyan / Azure) | Recommended max charge ceiling reached (`>= 80%` / `>= 90%`) — unplug to protect battery |
 | `45` (Muted gray) | Mouse asleep (`KC_HID_TIMEOUT`); keeps last known percentage until movement wakes it |
 | `--` / `!` | Initial startup check (`--`) or device disconnected / I/O error (`!`) |
 
@@ -27,21 +29,23 @@ Measured live on Windows x64 (`keychron-battery-tray.exe`, Ultra-Link 8K `2.4GHz
 | **Idle CPU** | **`0.00%`** (`0.00 ms` / 2s) | Blocked on `GetMessageW` + `WaitForMultipleObjects`; zero timer/busy loops |
 | **Startup CPU** | **`~47 ms`** (`46.9 ms`) | Cold launch, initial HID poll, paired PID lookup, and first `HICON` render |
 | **Private RAM** | **`~4.6 MB`** (`4.57 MB`) | Actual per-process private memory commit |
-| **Working Set** | **`~12.6 MB`** (`12.64 MB`) | Includes shared Windows `SHELL32.dll` / `GDI32` / `CfgMgr32` pages (`12.66 MB` peak) |
+| **Working Set** | **`~12.65 MB`** (`12.65 MB`) | Includes shared Windows `SHELL32.dll` / `GDI32` / `CfgMgr32` pages |
 | **Handles & GDI** | **`128` handles** | `17` GDI objects / `9` USER objects (`16`-slot MRU icon cache caps GDI growth) |
 | **Loaded DLLs** | **`29` DLLs** | Uses `CfgMgr32`; avoids `SETUPAPI.dll`, `CRYPT32.dll`, and lazy-loads `BluetoothApis.dll` |
-| **Binary Size** | **`60.5 KB` / `40 KB`** | `keychron-battery-tray.exe` (`60.5 KB`) + `keychron-battery.exe` (`40 KB`) |
+| **Binary Size** | **`71.0 KB` / `42.0 KB`** | `keychron-battery-tray.exe` (`71.0 KB`) + `keychron-battery.exe` (`42.0 KB`) |
 
 ## Features
 
 - **Native Windows 11 typography**: renders `Segoe UI Variable Text` Regular at `0.75×` tray icon size (`12 DIPs`, falling back to `Segoe UI` on Windows 10) into a `16`-slot MRU in-memory `CreateIconIndirect` `HICON` cache (zero temp `.ico` files, bounded GDI handles).
-- **Charging & smart alerts**: decodes byte `20` charging status (`0x80`), polls every `2m` while charging, and fires one-time Quiet-Time-aware Windows notifications (with hysteresis) for low battery and optional full charge (`100%`).
-- **Multi-mode fallback & paired model resolution**: identifies paired mice behind the Ultra-Link 8K dongle via `0xB5 0x03` (`Keychron M5`, `M6 8K`, `M7 8K`), shows the active link (`2.4GHz`, `USB`, or `BLE`), prefers wired USB when plugged in, and falls back to BLE GATT behind a docked 2.4GHz receiver with a `5m` miss cooldown so sleeping mice don't trigger repeated scans.
+- **Charging & Battery Protector (Charge Cycle Manager)**: decodes byte `20` charging status (`0x80`), polls every `2m` while charging, and helps extend Li-ion lifespan with:
+  - **Recommended charge bands**: `Longevity (25%–80%)` (default) or `Balanced (20%–90%)` or `Off`. Turns the tray number **yellow/amber** at the recommended plug-in floor (`25%`) and **cyan/blue** with an unplug notification at the charge ceiling (`80%`). *(Note: neither Keychron mouse firmware nor standard Windows USB host ports provide a software command to cut 5V VBUS power per port without disconnecting USB data, so capping uses visual/toast unplug protection.)*
+  - **Laptop battery guard**: uses Windows `GetSystemPowerStatus` and `PBT_APMPOWERSTATUSCHANGE` to detect laptop battery vs AC power, warning earlier when charging the mouse drains a low laptop battery (`<= 25%` while mouse `>= 50%`) and reminding you at `80%`.
+  - **Calibration cycle manager**: tracks cumulative `%` charged (with trickle-wobble deadband) and calendar days in Registry; recommends a `100%` fuel-gauge calibration every `10` equivalent cycles (for high-drain 8K use) or `90` days quarterly (`>= 1` cycle used; `180`-day max idle fallback), lifting the `80%` alert until `100%` is reached and resetting counters automatically.
 - **Active drain estimator**: tracks discharging usage across connected intervals (excluding idle sleep and offline gaps) to estimate `%/h` drain rate and remaining active hours in the tray menu.
 - **Event-driven wakeups & instant exit**: uses `WM_POWERBROADCAST` resume, `GUID_CONSOLE_DISPLAY_STATE` Modern Standby wake (60s cooldown), VID-filtered `WM_DEVICECHANGE` hotplug (`1.5s` settle on USB unplug), on-demand Raw Input mouse wake (`VID_3434` only — ignores touchpads and other mice, and scales prolonged sleep backoff up to your `Poll interval` while armed), `TaskbarCreated` recovery, and `CancelIoEx` cancellation on quit.
 - **Per-Monitor V2 DPI & theme aware**: adapts live to `WM_DPICHANGED`, `WM_DISPLAYCHANGE`, and `ImmersiveColorSet` (`SystemUsesLightTheme`).
 - **Lightweight `CfgMgr32` enumeration & caching**: avoids loading `SETUPAPI.dll` or `BluetoothApis.dll` in USB/2.4GHz sessions and caches both vendor HID interfaces and BLE GATT `0x180F` paths across polls and `--watch` runs.
-- **Persisted tray preferences**: stores settings (`PollMinutes`, `LowAlertPct`, `NotifyFull`, `TargetPid`, `TargetInterface`) under `HKCU\Software\KeychronBatteryTray` and optional auto-start under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+- **Persisted tray preferences**: stores settings (`PollMinutes`, `LowAlertPct`, `NotifyFull`, `TargetPid`, `TargetInterface`) and Battery Protector state (`ProtectorMode`, `ProtectorLaptopGuard`, `ProtectorCalibrating`, `ProtectorCumChargedPct`, `ProtectorLastCalUnix`, `ProtectorSnoozeUntil`) under `HKCU\Software\KeychronBatteryTray` and optional auto-start under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
 ## Layout
 
@@ -96,6 +100,7 @@ Run `.\build\keychron-battery-tray.exe` (CLI target overrides `--vid`, `--pid`, 
 - **Right-click**:
   - View device name, percentage, active link (`2.4GHz` / `USB` / `BLE`), reading timestamp (or asleep state), and active drain estimate when available
   - **Refresh now**
+  - **Battery Protector** (cycle/day counter, laptop AC/battery status, `Longevity 25%–80%` / `Balanced 20%–90%` / `Off`, `Laptop battery guard`, `Calibrate battery to 100%`, `Snooze 14 days`, `Reset cycle counter`)
   - **Device** (`Auto-detect` or pinned Keychron PID / interface)
   - **Poll interval** (`5m`, `15m`, `30m`, `60m`)
   - **Alerts** (`Low: Off` / `Below 10%` / `Below 15%` / `Below 20%`, plus `Notify when full (100%)`)

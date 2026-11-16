@@ -1,6 +1,7 @@
 #include "icon_render.h"
 #include "glyph_blit.h"
 #include "hid_win.h"
+#include "settings_win.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +20,9 @@ typedef enum kc_fg_expect {
     KC_FG_DARK,
     KC_FG_RED,
     KC_FG_GREEN,
-    KC_FG_GRAY
+    KC_FG_GRAY,
+    KC_FG_YELLOW,
+    KC_FG_CYAN
 } kc_fg_expect_t;
 
 static void verify_hicon_layout(HICON hicon,
@@ -79,6 +82,12 @@ static void verify_hicon_layout(HICON hicon,
                 } else if (fg == KC_FG_GRAY) {
                     uint8_t b = (uint8_t)(px & 0xFFU);
                     KC_CHECK(r == g && g == b && r <= a);
+                } else if (fg == KC_FG_YELLOW) {
+                    uint8_t b = (uint8_t)(px & 0xFFU);
+                    KC_CHECK(r >= g && g >= b);
+                } else if (fg == KC_FG_CYAN) {
+                    uint8_t b = (uint8_t)(px & 0xFFU);
+                    KC_CHECK(b >= g && g >= r);
                 } else {
                     KC_CHECK(r <= a);
                 }
@@ -148,7 +157,41 @@ int main(void) {
     HICON h46_light_stale = kc_icon_cache_get(&cache, "46", 24, true, KC_TONE_STALE);
     verify_hicon_layout(h46_light_stale, 24, KC_FG_GRAY, 13, 13);
 
-    /* Verify compact MRU eviction keeps cache bounded to KC_ICON_CACHE_CAP (16). */
+    HICON h25_yellow_dark = kc_icon_cache_get(&cache, "25", 24, false, KC_TONE_CHARGE_SOON);
+    verify_hicon_layout(h25_yellow_dark, 24, KC_FG_YELLOW, 13, 13);
+    HICON h25_yellow_light = kc_icon_cache_get(&cache, "25", 24, true, KC_TONE_CHARGE_SOON);
+    verify_hicon_layout(h25_yellow_light, 24, KC_FG_YELLOW, 13, 13);
+
+    HICON h80_cyan_light = kc_icon_cache_get(&cache, "80", 24, true, KC_TONE_CHARGE_LIMIT);
+    verify_hicon_layout(h80_cyan_light, 24, KC_FG_CYAN, 13, 13);
+    HICON h80_cyan_dark = kc_icon_cache_get(&cache, "80", 24, false, KC_TONE_CHARGE_LIMIT);
+    verify_hicon_layout(h80_cyan_dark, 24, KC_FG_CYAN, 13, 13);
+    KC_CHECK(h80_cyan_dark != h25_yellow_dark);
+
+    /* Verify Registry persistence round-trip for Battery Protector using an isolated key. */
+    const wchar_t *test_subkey = L"Software\\KeychronBatteryTray_TestProtector";
+    RegDeleteKeyW(HKEY_CURRENT_USER, test_subkey);
+    kc_protector_persist_t saved = {
+        .mode = (uint8_t)KC_PROT_BALANCED,
+        .laptop_guard = false,
+        .calibrating = true,
+        .cum_charged_pct = 1420U,
+        .last_cal_unix = 1712345678ULL,
+        .cal_snooze_until = 1712950478ULL
+    };
+    kc_protector_save_at(test_subkey, &saved);
+    kc_protector_persist_t loaded;
+    kc_protector_load_at(test_subkey, &loaded, 1713000000ULL);
+    RegDeleteKeyW(HKEY_CURRENT_USER, test_subkey);
+    KC_CHECK(loaded.mode == KC_PROT_BALANCED);
+    KC_CHECK(!loaded.laptop_guard);
+    KC_CHECK(loaded.calibrating);
+    KC_CHECK(loaded.cum_charged_pct == 1420U);
+    KC_CHECK(loaded.last_cal_unix == 1712345678ULL);
+    KC_CHECK(loaded.cal_snooze_until == 1712950478ULL);
+
+    /* Switch back to light taskbar and verify compact MRU eviction keeps cache bounded to 16. */
+    KC_CHECK(kc_icon_cache_get(&cache, "10", 24, true, KC_TONE_NORMAL) != NULL);
     HICON h_keep = kc_icon_cache_get(&cache, "10", 24, true, KC_TONE_NORMAL);
     for (int pct = 11; pct < 11 + (int)KC_ICON_CACHE_CAP - 1; ++pct) {
         char buf[8];

@@ -50,6 +50,17 @@
 #define IDM_DEV_AUTO          1300U
 #define KC_MENU_DEV_MAX       16U
 
+#define IDM_PROT_INFO1        1401U
+#define IDM_PROT_INFO2        1402U
+#define IDM_PROT_INFO3        1403U
+#define IDM_PROT_LONGEVITY    1410U
+#define IDM_PROT_BALANCED     1411U
+#define IDM_PROT_OFF          1412U
+#define IDM_PROT_LAPTOP_GUARD 1413U
+#define IDM_PROT_CAL_TOGGLE   1420U
+#define IDM_PROT_CAL_SNOOZE   1421U
+#define IDM_PROT_CAL_RESET    1422U
+
 #define KC_DISPLAY_WAKE_COOLDOWN_MS 60000ULL
 
 /* GUID_CONSOLE_DISPLAY_STATE from winnt.h without requiring <initguid.h>. */
@@ -80,6 +91,12 @@ typedef struct kc_tray_app {
     int target_interface;
 
     kc_tray_settings_t settings;
+    kc_protector_persist_t prot_persist;
+    kc_protector_runtime_t prot_rt;
+    bool has_sys_battery;
+    bool on_laptop_battery;
+    uint8_t laptop_pct;
+
     kc_hid_session_t hid_session;
     uint32_t session_epoch;
     kc_poll_state_t poll_state;
@@ -148,29 +165,200 @@ static const wchar_t *kc_device_label(const kc_tray_app_t *app) {
     return L"Keychron mouse";
 }
 
+static uint64_t kc_unix_now_sec(void) {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER uli;
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    if (uli.QuadPart < 116444736000000000ULL) {
+        return 0ULL;
+    }
+    return (uint64_t)((uli.QuadPart - 116444736000000000ULL) / 10000000ULL);
+}
+
+static void kc_refresh_host_power(kc_tray_app_t *app) {
+    if (!app) {
+        return;
+    }
+    SYSTEM_POWER_STATUS sps;
+    if (!GetSystemPowerStatus(&sps)) {
+        app->has_sys_battery = false;
+        app->on_laptop_battery = false;
+        app->laptop_pct = 100U;
+        return;
+    }
+    bool no_batt = (sps.BatteryFlag == 255U) || ((sps.BatteryFlag & 128U) != 0U);
+    app->has_sys_battery = !no_batt;
+    app->on_laptop_battery = !no_batt && (sps.ACLineStatus == 0U);
+    app->laptop_pct = (sps.BatteryLifePercent <= 100U) ? (uint8_t)sps.BatteryLifePercent : 100U;
+}
+
+static kc_icon_tone_t kc_visual_to_tone(kc_battery_visual_t vis) {
+    switch (vis) {
+        case KC_VIS_LOW:          return KC_TONE_LOW;
+        case KC_VIS_CHARGING:     return KC_TONE_CHARGING;
+        case KC_VIS_STALE:        return KC_TONE_STALE;
+        case KC_VIS_CHARGE_SOON:  return KC_TONE_CHARGE_SOON;
+        case KC_VIS_CHARGE_LIMIT: return KC_TONE_CHARGE_LIMIT;
+        default:                  return KC_TONE_NORMAL;
+    }
+}
+
+typedef enum kc_toast_kind {
+    KC_TOAST_NONE = 0,
+    KC_TOAST_CAL_COMPLETE,
+    KC_TOAST_LOW,
+    KC_TOAST_CHARGE_LIMIT,
+    KC_TOAST_LAPTOP_GUARD,
+    KC_TOAST_CHARGE_SOON,
+    KC_TOAST_FULL,
+    KC_TOAST_CAL_DUE
+} kc_toast_kind_t;
+
+static void kc_rollback_toast(kc_tray_app_t *app, kc_toast_kind_t toast) {
+    switch (toast) {
+        case KC_TOAST_CAL_COMPLETE:
+            app->prot_rt.pending_cal_complete = true;
+            break;
+        case KC_TOAST_LOW:
+            app->poll_state.low_battery_notified = false;
+            break;
+        case KC_TOAST_CHARGE_LIMIT:
+            app->prot_rt.charge_limit_notified = false;
+            break;
+        case KC_TOAST_LAPTOP_GUARD:
+            app->prot_rt.laptop_guard_notified = false;
+            break;
+        case KC_TOAST_CHARGE_SOON:
+            app->prot_rt.charge_soon_notified = false;
+            break;
+        case KC_TOAST_FULL:
+            app->poll_state.full_battery_notified = false;
+            break;
+        case KC_TOAST_CAL_DUE:
+            app->prot_rt.cal_due_notified = false;
+            break;
+        default:
+            break;
+    }
+}
+
+static void kc_fill_toast_info(const kc_tray_app_t *app,
+                               kc_toast_kind_t toast,
+                               uint64_t now_unix,
+                               NOTIFYICONDATAW *nid) {
+    const wchar_t *name = kc_device_label(app);
+    uint8_t min_p = 0U;
+    uint8_t max_p = 100U;
+    kc_protector_bounds(app->prot_persist.mode, &min_p, &max_p);
+
+    if (toast == KC_TOAST_CAL_COMPLETE) {
+        nid->dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+        wcsncpy(nid->szInfoTitle, L"Battery Calibration Complete", 63);
+        if (app->prot_persist.mode != (uint8_t)KC_PROT_OFF) {
+            _snwprintf(nid->szInfo, 255,
+                       L"%ls reached 100%% and reset cycle counters. Unplug mouse (%u%% limit resumed).",
+                       name, (unsigned)max_p);
+        } else {
+            _snwprintf(nid->szInfo, 255, L"%ls calibrated cleanly to 100%%.", name);
+        }
+    } else if (toast == KC_TOAST_LOW) {
+        nid->dwInfoFlags = NIIF_WARNING | NIIF_RESPECT_QUIET_TIME;
+        wcsncpy(nid->szInfoTitle, L"Keychron Mouse Battery Low", 63);
+        _snwprintf(nid->szInfo, 255, L"%ls battery is at %u%%.",
+                   name, (unsigned)app->poll_state.last_pct);
+    } else if (toast == KC_TOAST_CHARGE_LIMIT) {
+        nid->dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+        if (app->on_laptop_battery) {
+            _snwprintf(nid->szInfoTitle, 63, L"Unplug Mouse (%u%% Limit)", (unsigned)max_p);
+            _snwprintf(nid->szInfo, 255,
+                       L"%ls reached %u%%. Unplug USB cable to extend mouse battery lifespan and save laptop battery.",
+                       name, (unsigned)app->poll_state.last_pct);
+        } else {
+            _snwprintf(nid->szInfoTitle, 63, L"Recommended %u%% Limit Reached", (unsigned)max_p);
+            _snwprintf(nid->szInfo, 255,
+                       L"%ls is at %u%%. Unplug USB cable to maximize battery lifespan.",
+                       name, (unsigned)app->poll_state.last_pct);
+        }
+    } else if (toast == KC_TOAST_LAPTOP_GUARD) {
+        nid->dwInfoFlags = NIIF_WARNING | NIIF_RESPECT_QUIET_TIME;
+        wcsncpy(nid->szInfoTitle, L"Laptop Battery Guard", 63);
+        _snwprintf(nid->szInfo, 255,
+                   L"Laptop battery is at %u%% while %ls is already %u%%. Consider unplugging mouse cable.",
+                   (unsigned)app->laptop_pct, name, (unsigned)app->poll_state.last_pct);
+    } else if (toast == KC_TOAST_CHARGE_SOON) {
+        bool cal_due = kc_protector_is_cal_due(&app->prot_persist, now_unix, NULL, NULL);
+        nid->dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+        wcsncpy(nid->szInfoTitle, L"Good Time to Charge Mouse", 63);
+        if (cal_due) {
+            _snwprintf(nid->szInfo, 255,
+                       L"%ls is at %u%% (recommended >=%u%%). Periodic 100%% calibration is also due.",
+                       name, (unsigned)app->poll_state.last_pct, (unsigned)min_p);
+        } else {
+            _snwprintf(nid->szInfo, 255,
+                       L"%ls is at %u%% (recommended charge point <=%u%%).",
+                       name, (unsigned)app->poll_state.last_pct, (unsigned)min_p);
+        }
+    } else if (toast == KC_TOAST_FULL) {
+        nid->dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+        wcsncpy(nid->szInfoTitle, L"Keychron Mouse Charged", 63);
+        _snwprintf(nid->szInfo, 255, L"%ls battery is fully charged (100%%).", name);
+    } else if (toast == KC_TOAST_CAL_DUE) {
+        uint32_t days = 0U, cyc_x10 = 0U;
+        kc_protector_is_cal_due(&app->prot_persist, now_unix, &days, &cyc_x10);
+        nid->dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+        wcsncpy(nid->szInfoTitle, L"Battery Calibration Recommended", 63);
+        _snwprintf(nid->szInfo, 255,
+                   L"%ls: %u.%u cycles / %u days since last 100%% calibration. Enable 'Calibrate to 100%%' in Battery Protector next charge.",
+                   name, (unsigned)(cyc_x10 / 10U), (unsigned)(cyc_x10 % 10U), (unsigned)days);
+    }
+    nid->szInfoTitle[63] = L'\0';
+    nid->szInfo[255] = L'\0';
+}
+
 static void kc_format_status_line(const kc_tray_app_t *app, wchar_t out_line[128]) {
     const wchar_t *name = kc_device_label(app);
     const wchar_t *link = kc_hid_link_label_w(app->hid_session.active_link);
 
     if (app->poll_state.has_reading) {
         if (app->poll_state.consecutive_failures == 0U) {
-            wchar_t detail[64] = L"";
+            wchar_t detail[96] = L"";
             size_t pos = 0U;
             if (link[0] != L'\0') {
-                int n = _snwprintf(detail + pos, 64U - pos, L"%ls", link);
+                int n = _snwprintf(detail + pos, 96U - pos, L"%ls", link);
                 if (n > 0) pos += (size_t)n;
             }
-            if (app->poll_state.last_charging && pos < 63U) {
-                int n = _snwprintf(detail + pos, 64U - pos, L"%lscharging", pos > 0U ? L", " : L"");
+            uint8_t min_p = 0U, max_p = 100U;
+            kc_protector_bounds(app->prot_persist.mode, &min_p, &max_p);
+            if (app->poll_state.last_charging && pos < 95U) {
+                int n = 0;
+                if (app->prot_persist.mode != (uint8_t)KC_PROT_OFF && app->prot_persist.calibrating) {
+                    n = _snwprintf(detail + pos, 96U - pos, L"%lscal -> 100%%", pos > 0U ? L", " : L"");
+                } else if (app->prot_persist.mode != (uint8_t)KC_PROT_OFF && app->poll_state.last_pct >= max_p) {
+                    n = _snwprintf(detail + pos, 96U - pos, L"%ls%ls",
+                                   pos > 0U ? L", " : L"",
+                                   app->on_laptop_battery ? L"unplug (laptop batt)" : L"unplug (limit)");
+                } else {
+                    n = _snwprintf(detail + pos, 96U - pos, L"%lscharging", pos > 0U ? L", " : L"");
+                }
+                if (n > 0) pos += (size_t)n;
+            } else if (!app->poll_state.last_charging &&
+                       app->prot_persist.mode != (uint8_t)KC_PROT_OFF &&
+                       min_p > 0U && app->poll_state.last_pct <= min_p &&
+                       !(app->settings.low_alert_pct > 0U &&
+                         app->poll_state.last_pct <= app->settings.low_alert_pct) &&
+                       pos < 95U) {
+                int n = _snwprintf(detail + pos, 96U - pos, L"%lscharge soon", pos > 0U ? L", " : L"");
                 if (n > 0) pos += (size_t)n;
             }
-            if (app->has_reading_time && pos < 63U) {
-                _snwprintf(detail + pos, 64U - pos, L"%ls%02u:%02u",
+            if (app->has_reading_time && pos < 95U) {
+                _snwprintf(detail + pos, 96U - pos, L"%ls%02u:%02u",
                            pos > 0U ? L", " : L"",
                            (unsigned)app->last_reading_time.wHour,
                            (unsigned)app->last_reading_time.wMinute);
             }
-            detail[63] = L'\0';
+            detail[95] = L'\0';
             if (detail[0] != L'\0') {
                 _snwprintf(out_line, 128, L"%ls: %u%% (%ls)",
                            name, (unsigned)app->poll_state.last_pct, detail);
@@ -202,14 +390,13 @@ static void kc_format_status_line(const kc_tray_app_t *app, wchar_t out_line[128
 }
 
 static void kc_build_display_state(kc_tray_app_t *app,
+                                   uint64_t now_unix,
                                    char out_glyph[8],
                                    wchar_t out_tip[128],
                                    kc_icon_tone_t *out_tone,
-                                   bool *out_low_alert,
-                                   bool *out_full_alert) {
+                                   kc_toast_kind_t *out_toast) {
     *out_tone = KC_TONE_NORMAL;
-    *out_low_alert = false;
-    *out_full_alert = false;
+    *out_toast = KC_TOAST_NONE;
 
     if (app->poll_state.has_reading) {
         bool is_sleeping = (app->poll_state.consecutive_failures > 0U &&
@@ -219,21 +406,43 @@ static void kc_build_display_state(kc_tray_app_t *app,
             strncpy(out_glyph, "!", 8);
         } else {
             snprintf(out_glyph, 8, "%u", (unsigned)app->poll_state.last_pct);
-            if (app->poll_state.consecutive_failures > 0U) {
-                *out_tone = KC_TONE_STALE;
-            } else if (app->poll_state.last_charging) {
-                *out_tone = KC_TONE_CHARGING;
-            } else if (app->settings.low_alert_pct > 0U &&
-                       app->poll_state.last_pct <= app->settings.low_alert_pct) {
-                *out_tone = KC_TONE_LOW;
-            }
+            kc_battery_visual_t vis = kc_compute_battery_visual(
+                &app->poll_state, &app->prot_persist, app->settings.low_alert_pct);
+            *out_tone = kc_visual_to_tone(vis);
         }
 
         if (app->poll_state.consecutive_failures == 0U) {
-            *out_low_alert = kc_check_low_battery_alert(
-                &app->poll_state, app->settings.low_alert_pct);
-            *out_full_alert = kc_check_full_battery_alert(
-                &app->poll_state, app->settings.notify_full);
+            bool cal_done = app->prot_rt.pending_cal_complete;
+            if (cal_done) {
+                app->prot_rt.pending_cal_complete = false;
+                *out_toast = KC_TOAST_CAL_COMPLETE;
+            }
+            if (kc_check_low_battery_alert(&app->poll_state, app->settings.low_alert_pct) &&
+                *out_toast == KC_TOAST_NONE) {
+                *out_toast = KC_TOAST_LOW;
+            }
+            if (kc_check_charge_limit_alert(&app->poll_state, &app->prot_persist, &app->prot_rt) &&
+                *out_toast == KC_TOAST_NONE) {
+                *out_toast = KC_TOAST_CHARGE_LIMIT;
+            }
+            if (kc_check_laptop_guard_alert(&app->poll_state, &app->prot_persist, &app->prot_rt,
+                                            app->has_sys_battery, app->on_laptop_battery, app->laptop_pct) &&
+                *out_toast == KC_TOAST_NONE) {
+                *out_toast = KC_TOAST_LAPTOP_GUARD;
+            }
+            if (kc_check_charge_soon_alert(&app->poll_state, &app->prot_persist, &app->prot_rt,
+                                           app->settings.low_alert_pct) &&
+                *out_toast == KC_TOAST_NONE) {
+                *out_toast = KC_TOAST_CHARGE_SOON;
+            }
+            if (!cal_done && kc_check_full_battery_alert(&app->poll_state, app->settings.notify_full) &&
+                *out_toast == KC_TOAST_NONE) {
+                *out_toast = KC_TOAST_FULL;
+            }
+            if (*out_toast == KC_TOAST_NONE &&
+                kc_check_cal_due_alert(&app->poll_state, &app->prot_persist, &app->prot_rt, now_unix)) {
+                *out_toast = KC_TOAST_CAL_DUE;
+            }
         }
     } else if (app->poll_state.consecutive_failures > 0U) {
         strncpy(out_glyph, "!", 8);
@@ -249,17 +458,17 @@ static void kc_sync_tray_icon(kc_tray_app_t *app, bool force_add) {
     char glyph[8];
     wchar_t tip[128];
     kc_icon_tone_t tone = KC_TONE_NORMAL;
-    bool low_alert = false;
-    bool full_alert = false;
+    kc_toast_kind_t toast = KC_TOAST_NONE;
+    uint64_t now_unix = kc_unix_now_sec();
 
-    kc_build_display_state(app, glyph, tip, &tone, &low_alert, &full_alert);
-    bool want_toast = low_alert || full_alert;
+    kc_refresh_host_power(app);
+    kc_build_display_state(app, now_unix, glyph, tip, &tone, &toast);
+    bool want_toast = (toast != KC_TOAST_NONE);
 
     HICON hicon = kc_icon_cache_get(
         &app->icon_cache, glyph, app->icon_size, app->light_taskbar, tone);
     if (!hicon) {
-        if (low_alert) app->poll_state.low_battery_notified = false;
-        if (full_alert) app->poll_state.full_battery_notified = false;
+        kc_rollback_toast(app, toast);
         return;
     }
 
@@ -282,19 +491,8 @@ static void kc_sync_tray_icon(kc_tray_app_t *app, bool force_add) {
     wcsncpy(nid.szTip, tip, 127);
     nid.szTip[127] = L'\0';
 
-    if (low_alert) {
-        nid.dwInfoFlags = NIIF_WARNING | NIIF_RESPECT_QUIET_TIME;
-        wcsncpy(nid.szInfoTitle, L"Keychron Mouse Battery Low", 63);
-        _snwprintf(nid.szInfo, 255, L"%ls battery is at %u%%.",
-                   kc_device_label(app),
-                   (unsigned)app->poll_state.last_pct);
-        nid.szInfo[255] = L'\0';
-    } else if (full_alert) {
-        nid.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
-        wcsncpy(nid.szInfoTitle, L"Keychron Mouse Charged", 63);
-        _snwprintf(nid.szInfo, 255, L"%ls battery is fully charged (100%%).",
-                   kc_device_label(app));
-        nid.szInfo[255] = L'\0';
+    if (want_toast) {
+        kc_fill_toast_info(app, toast, now_unix, &nid);
     }
 
     if (force_add || !app->tray_added) {
@@ -305,8 +503,7 @@ static void kc_sync_tray_icon(kc_tray_app_t *app, bool force_add) {
         if (Shell_NotifyIconW(NIM_ADD, &nid)) {
             app->tray_added = true;
         } else {
-            if (low_alert) app->poll_state.low_battery_notified = false;
-            if (full_alert) app->poll_state.full_battery_notified = false;
+            kc_rollback_toast(app, toast);
             return;
         }
     } else {
@@ -389,9 +586,22 @@ static DWORD WINAPI kc_worker_proc(LPVOID param) {
         bool rerun_now = app->pending_refresh;
         app->pending_refresh = false;
         bool epoch_match = (app->session_epoch == start_epoch);
+        bool prot_dirty = false;
+        kc_protector_persist_t prot_copy;
+        memset(&prot_copy, 0, sizeof(prot_copy));
         if (epoch_match) {
             if (st == KC_HID_OK) {
                 kc_poll_state_record_success(&app->poll_state, pct, charging, GetTickCount64());
+                bool cal_completed = false;
+                prot_dirty = kc_protector_record_sample(
+                    &app->prot_persist, &app->prot_rt, pct, charging, kc_unix_now_sec(),
+                    &cal_completed);
+                if (cal_completed) {
+                    app->poll_state.full_battery_notified = true;
+                }
+                if (prot_dirty) {
+                    prot_copy = app->prot_persist;
+                }
             } else {
                 kc_poll_state_record_failure(&app->poll_state);
             }
@@ -400,6 +610,10 @@ static DWORD WINAPI kc_worker_proc(LPVOID param) {
         uint32_t wait_ms = kc_next_wait_ms_for_wake(
             &app->poll_state, normal_ms, app->raw_watch_armed);
         LeaveCriticalSection(&app->state_lock);
+
+        if (prot_dirty) {
+            kc_protector_save(&prot_copy);
+        }
 
         if (epoch_match) {
             PostMessageW(app->hwnd, WM_APP_POLL_RESULT, (WPARAM)st, (LPARAM)pct);
@@ -579,7 +793,15 @@ static void kc_copy_diagnostics(kc_tray_app_t *app) {
     bool raw_armed = app->raw_watch_armed;
     uint32_t rate_x10 = 0U, hours_x10 = 0U;
     bool has_est = kc_estimate_drain(&app->poll_state, &rate_x10, &hours_x10);
+    kc_protector_persist_t prot = app->prot_persist;
+    bool has_sys_batt = app->has_sys_battery;
+    bool on_batt = app->on_laptop_battery;
+    uint8_t lap_pct = app->laptop_pct;
     LeaveCriticalSection(&app->state_lock);
+
+    uint64_t now_unix = kc_unix_now_sec();
+    uint32_t cal_days = 0U, cal_cyc_x10 = 0U;
+    bool cal_due = kc_protector_is_cal_due(&prot, now_unix, &cal_days, &cal_cyc_x10);
 
     WideCharToMultiByte(CP_UTF8, 0, prod_w, -1, prod_utf8, sizeof(prod_utf8), NULL, NULL);
     WideCharToMultiByte(CP_UTF8, 0, status_w, -1, status_utf8, sizeof(status_utf8), NULL, NULL);
@@ -599,17 +821,30 @@ static void kc_copy_diagnostics(kc_tray_app_t *app) {
                  (unsigned)(rate_x10 / 10U), (unsigned)(rate_x10 % 10U),
                  (unsigned)(hours_x10 / 10U), (unsigned)(hours_x10 % 10U));
     }
+    const char *prot_mode_s = (prot.mode == (uint8_t)KC_PROT_OFF) ? "off" :
+                              (prot.mode == (uint8_t)KC_PROT_BALANCED) ? "balanced" : "longevity";
+    char host_buf[64] = "";
+    if (has_sys_batt) {
+        snprintf(host_buf, sizeof(host_buf),
+                 ",\"laptop_on_battery\":%s,\"laptop_pct\":%u",
+                 on_batt ? "true" : "false", (unsigned)lap_pct);
+    }
 
-    char json[1280];
+    char json[1536];
     snprintf(json, sizeof(json),
              "{\"version\":\"%s\",\"vid\":\"0x%04x\",\"pid\":\"0x%04x\",\"interface\":%d,"
              "\"link\":\"%s\",\"product\":\"%s\"%s,\"has_reading\":%s,\"battery\":%u,"
-             "\"charging\":%s,\"status\":\"%s\",\"failures\":%u,\"raw_wake_armed\":%s%s}",
+             "\"charging\":%s,\"status\":\"%s\",\"failures\":%u,\"raw_wake_armed\":%s%s,"
+             "\"protector_mode\":\"%s\",\"calibrating\":%s,\"cycles\":%u.%u,"
+             "\"days_since_cal\":%u,\"cal_due\":%s%s}",
              KC_APP_VERSION, (unsigned)vid, (unsigned)pid, iface,
              link_str, prod_esc, paired_buf,
              has_reading ? "true" : "false", (unsigned)pct,
              charging ? "true" : "false", status_esc, (unsigned)fails,
-             raw_armed ? "true" : "false", est_buf);
+             raw_armed ? "true" : "false", est_buf,
+             prot_mode_s, prot.calibrating ? "true" : "false",
+             (unsigned)(cal_cyc_x10 / 10U), (unsigned)(cal_cyc_x10 % 10U),
+             (unsigned)cal_days, cal_due ? "true" : "false", host_buf);
     json[sizeof(json) - 1U] = '\0';
 
     int wchars = MultiByteToWideChar(CP_UTF8, 0, json, -1, NULL, 0);
@@ -641,13 +876,119 @@ static void kc_copy_diagnostics(kc_tray_app_t *app) {
     CloseClipboard();
 }
 
+static UINT kc_protector_mode_menu_id(uint8_t mode) {
+    if (mode == (uint8_t)KC_PROT_OFF) {
+        return IDM_PROT_OFF;
+    }
+    if (mode == (uint8_t)KC_PROT_BALANCED) {
+        return IDM_PROT_BALANCED;
+    }
+    return IDM_PROT_LONGEVITY;
+}
+
+static void kc_populate_protector_submenu(const kc_tray_app_t *app,
+                                            HMENU prot_sub,
+                                            const kc_protector_persist_t *prot,
+                                            uint64_t now_unix,
+                                            wchar_t out_parent_label[64]) {
+    uint8_t min_p = 0U, max_p = 100U;
+    kc_protector_bounds(prot->mode, &min_p, &max_p);
+    uint32_t days = 0U, cyc_x10 = 0U;
+    bool cal_due = kc_protector_is_cal_due(prot, now_unix, &days, &cyc_x10);
+    bool at_limit = (prot->mode != (uint8_t)KC_PROT_OFF && !prot->calibrating &&
+                     app->poll_state.has_reading && app->poll_state.consecutive_failures == 0U &&
+                     app->poll_state.last_charging && app->poll_state.last_pct >= max_p);
+
+    if (prot->calibrating) {
+        wcsncpy(out_parent_label, L"Battery Protector (Calibrating -> 100%)", 63);
+    } else if (at_limit) {
+        _snwprintf(out_parent_label, 64, L"Battery Protector (%u%% cap - unplug!)", (unsigned)max_p);
+    } else if (cal_due) {
+        wcsncpy(out_parent_label, L"Battery Protector (Calibration due)", 63);
+    } else if (prot->mode == (uint8_t)KC_PROT_OFF) {
+        wcsncpy(out_parent_label, L"Battery Protector (Off)", 63);
+    } else {
+        _snwprintf(out_parent_label, 64, L"Battery Protector (%u%%-%u%%)", (unsigned)min_p, (unsigned)max_p);
+    }
+    out_parent_label[63] = L'\0';
+
+    wchar_t info1[96];
+    if (prot->mode == (uint8_t)KC_PROT_OFF) {
+        wcsncpy(info1, L"Status: Protection off", 95);
+    } else if (prot->calibrating) {
+        wcsncpy(info1, L"Status: Calibrating (charging up to 100%)", 95);
+    } else {
+        _snwprintf(info1, 96, L"Active: Yellow <=%u%%, unplug >=%u%%",
+                   (unsigned)min_p, (unsigned)max_p);
+    }
+    info1[95] = L'\0';
+    AppendMenuW(prot_sub, MF_STRING | MF_GRAYED, IDM_PROT_INFO1, info1);
+
+    wchar_t info2[96];
+    _snwprintf(info2, 96, L"Cycles: %u.%u / %u (%u / %u days since cal.)",
+               (unsigned)(cyc_x10 / 10U), (unsigned)(cyc_x10 % 10U),
+               (unsigned)(KC_CAL_CYCLE_TARGET_PCT / 100U),
+               (unsigned)days, (unsigned)KC_CAL_INTERVAL_DAYS);
+    info2[95] = L'\0';
+    AppendMenuW(prot_sub, MF_STRING | MF_GRAYED, IDM_PROT_INFO2, info2);
+
+    if (app->has_sys_battery) {
+        wchar_t info3[96];
+        _snwprintf(info3, 96, L"Laptop power: %ls (%u%%)",
+                   app->on_laptop_battery ? L"On battery" : L"AC plugged in",
+                   (unsigned)app->laptop_pct);
+        info3[95] = L'\0';
+        AppendMenuW(prot_sub, MF_STRING | MF_GRAYED, IDM_PROT_INFO3, info3);
+    }
+
+    AppendMenuW(prot_sub, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(prot_sub, MF_STRING, IDM_PROT_LONGEVITY, L"Longevity (25% - 80%) [Recommended]");
+    AppendMenuW(prot_sub, MF_STRING, IDM_PROT_BALANCED, L"Balanced (20% - 90%)");
+    AppendMenuW(prot_sub, MF_STRING, IDM_PROT_OFF, L"Off");
+    CheckMenuRadioItem(prot_sub, IDM_PROT_LONGEVITY, IDM_PROT_OFF,
+                       kc_protector_mode_menu_id(prot->mode), MF_BYCOMMAND);
+
+    AppendMenuW(prot_sub, MF_SEPARATOR, 0, NULL);
+    UINT lguard_flags = MF_STRING | (prot->laptop_guard ? MF_CHECKED : MF_UNCHECKED);
+    if (prot->mode == (uint8_t)KC_PROT_OFF) {
+        lguard_flags |= MF_GRAYED;
+    }
+    AppendMenuW(prot_sub, lguard_flags, IDM_PROT_LAPTOP_GUARD,
+                L"Laptop battery guard (warn on low laptop batt)");
+
+    AppendMenuW(prot_sub, MF_SEPARATOR, 0, NULL);
+    const wchar_t *cal_label = prot->calibrating
+        ? L"Cancel 100% calibration"
+        : (cal_due ? L"Calibrate battery to 100% (recommended)"
+                   : L"Calibrate battery to 100% next charge");
+    UINT cal_flags = MF_STRING;
+    if (prot->mode == (uint8_t)KC_PROT_OFF) {
+        cal_flags |= MF_GRAYED;
+    } else if (prot->calibrating) {
+        cal_flags |= MF_CHECKED;
+    }
+    AppendMenuW(prot_sub, cal_flags, IDM_PROT_CAL_TOGGLE, cal_label);
+    wchar_t snooze_label[64];
+    _snwprintf(snooze_label, 64, L"Snooze calibration reminder (%u days)",
+               (unsigned)KC_CAL_SNOOZE_DAYS);
+    snooze_label[63] = L'\0';
+    AppendMenuW(prot_sub,
+                MF_STRING | ((cal_due && !prot->calibrating) ? 0U : MF_GRAYED),
+                IDM_PROT_CAL_SNOOZE,
+                snooze_label);
+    AppendMenuW(prot_sub, MF_STRING, IDM_PROT_CAL_RESET,
+                L"Reset cycle counter (mark calibrated)");
+}
+
 static void kc_show_context_menu(kc_tray_app_t *app) {
     HMENU menu = CreatePopupMenu();
     HMENU dev_sub = CreatePopupMenu();
+    HMENU prot_sub = CreatePopupMenu();
     HMENU poll_sub = CreatePopupMenu();
     HMENU alert_sub = CreatePopupMenu();
-    if (!menu || !dev_sub || !poll_sub || !alert_sub) {
+    if (!menu || !dev_sub || !prot_sub || !poll_sub || !alert_sub) {
         if (dev_sub) DestroyMenu(dev_sub);
+        if (prot_sub) DestroyMenu(prot_sub);
         if (poll_sub) DestroyMenu(poll_sub);
         if (alert_sub) DestroyMenu(alert_sub);
         if (menu) DestroyMenu(menu);
@@ -660,16 +1001,20 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
 
     wchar_t status_line[128];
     wchar_t est_line[96] = L"";
+    wchar_t prot_title[64] = L"Battery Protector";
     uint32_t poll_minutes = 30U;
     uint8_t low_pct = 15U;
     bool notify_full = true;
     bool has_est = false;
+    uint64_t now_unix = kc_unix_now_sec();
 
     EnterCriticalSection(&app->state_lock);
+    kc_refresh_host_power(app);
     poll_minutes = app->settings.poll_minutes;
     low_pct = app->settings.low_alert_pct;
     notify_full = app->settings.notify_full;
     kc_format_status_line(app, status_line);
+    kc_populate_protector_submenu(app, prot_sub, &app->prot_persist, now_unix, prot_title);
     uint32_t rate_x10 = 0U, hours_x10 = 0U;
     if (kc_estimate_drain(&app->poll_state, &rate_x10, &hours_x10)) {
         has_est = true;
@@ -708,6 +1053,7 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
         AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_STATUS_EST, est_line);
     }
     AppendMenuW(menu, MF_STRING, IDM_REFRESH, L"Refresh now");
+    AppendMenuW(menu, MF_POPUP, (UINT_PTR)prot_sub, prot_title);
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)dev_sub, L"Device");
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)poll_sub, L"Poll interval");
     AppendMenuW(menu, MF_POPUP, (UINT_PTR)alert_sub, L"Alerts");
@@ -751,6 +1097,7 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
             app->device_product[0] = L'\0';
             app->has_reading_time = false;
             kc_poll_state_init(&app->poll_state);
+            kc_protector_runtime_reset_session(&app->prot_rt);
             app->raw_cache_count = 0U;
             kc_sync_tray_icon(app, false);
             LeaveCriticalSection(&app->state_lock);
@@ -764,6 +1111,54 @@ static void kc_show_context_menu(kc_tray_app_t *app) {
     }
 
     switch (cmd) {
+        case IDM_PROT_LONGEVITY:
+        case IDM_PROT_BALANCED:
+        case IDM_PROT_OFF: {
+            uint8_t new_mode = (cmd == IDM_PROT_OFF) ? (uint8_t)KC_PROT_OFF :
+                               (cmd == IDM_PROT_BALANCED) ? (uint8_t)KC_PROT_BALANCED :
+                               (uint8_t)KC_PROT_LONGEVITY;
+            EnterCriticalSection(&app->state_lock);
+            app->prot_persist.mode = new_mode;
+            if (new_mode == (uint8_t)KC_PROT_OFF) {
+                app->prot_persist.calibrating = false;
+            }
+            app->prot_rt.charge_soon_notified = false;
+            app->prot_rt.charge_limit_notified = false;
+            kc_protector_save(&app->prot_persist);
+            kc_sync_tray_icon(app, false);
+            LeaveCriticalSection(&app->state_lock);
+            break;
+        }
+        case IDM_PROT_LAPTOP_GUARD:
+            EnterCriticalSection(&app->state_lock);
+            app->prot_persist.laptop_guard = !app->prot_persist.laptop_guard;
+            app->prot_rt.laptop_guard_notified = false;
+            kc_protector_save(&app->prot_persist);
+            kc_sync_tray_icon(app, false);
+            LeaveCriticalSection(&app->state_lock);
+            break;
+        case IDM_PROT_CAL_TOGGLE:
+            EnterCriticalSection(&app->state_lock);
+            kc_protector_set_calibrating(&app->prot_persist, &app->prot_rt,
+                                         !app->prot_persist.calibrating);
+            kc_protector_save(&app->prot_persist);
+            kc_sync_tray_icon(app, false);
+            LeaveCriticalSection(&app->state_lock);
+            break;
+        case IDM_PROT_CAL_SNOOZE:
+            EnterCriticalSection(&app->state_lock);
+            kc_protector_snooze_calibration(&app->prot_persist, &app->prot_rt, kc_unix_now_sec());
+            kc_protector_save(&app->prot_persist);
+            kc_sync_tray_icon(app, false);
+            LeaveCriticalSection(&app->state_lock);
+            break;
+        case IDM_PROT_CAL_RESET:
+            EnterCriticalSection(&app->state_lock);
+            kc_protector_reset_calibration(&app->prot_persist, &app->prot_rt, kc_unix_now_sec());
+            kc_protector_save(&app->prot_persist);
+            kc_sync_tray_icon(app, false);
+            LeaveCriticalSection(&app->state_lock);
+            break;
         case IDM_REFRESH:
             EnterCriticalSection(&app->state_lock);
             app->hid_session.next_fallback_probe_ms = 0ULL;
@@ -966,6 +1361,12 @@ static LRESULT CALLBACK kc_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
                     }
                 }
             }
+            if (wparam == PBT_APMPOWERSTATUSCHANGE) {
+                EnterCriticalSection(&app->state_lock);
+                kc_refresh_host_power(app);
+                kc_sync_tray_icon(app, false);
+                LeaveCriticalSection(&app->state_lock);
+            }
             return TRUE;
 
         case WM_DEVICECHANGE:
@@ -1057,6 +1458,9 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE hprev, PWSTR cmdline, int show) {
     memset(&g_app, 0, sizeof(g_app));
     g_app.hinst = hinst;
     kc_settings_load(&g_app.settings);
+    kc_protector_load(&g_app.prot_persist, 0ULL);
+    kc_protector_runtime_init(&g_app.prot_rt);
+    kc_refresh_host_power(&g_app);
     g_app.target_vid = KEYCHRON_VID;
     g_app.target_pid = g_app.settings.target_pid;
     g_app.target_interface = (int)g_app.settings.target_interface;

@@ -192,4 +192,135 @@ bool kc_parse_int_range_w(const wchar_t *arg, int min_val, int max_val, int *out
 /** Escape UTF-8 text as JSON string contents (without outer quotes). Returns chars needed. */
 size_t kc_json_escape(const char *src, char *dst, size_t dst_cap);
 
+#define KC_PROT_LONGEVITY_MIN_PCT  25U
+#define KC_PROT_LONGEVITY_MAX_PCT  80U
+#define KC_PROT_BALANCED_MIN_PCT   20U
+#define KC_PROT_BALANCED_MAX_PCT   90U
+#define KC_PROT_HYST_PCT           5U
+#define KC_CAL_CYCLE_TARGET_PCT    1000U
+#define KC_CAL_MIN_DAYS_CYCLES_PCT 100U
+#define KC_CAL_INTERVAL_DAYS       90U
+#define KC_CAL_MAX_IDLE_DAYS       180U
+#define KC_CAL_SNOOZE_DAYS         14U
+#define KC_LAPTOP_GUARD_PCT        25U
+#define KC_LAPTOP_GUARD_MOUSE_MIN  50U
+
+typedef enum kc_protector_mode {
+    KC_PROT_OFF = 0,
+    KC_PROT_LONGEVITY = 1,
+    KC_PROT_BALANCED = 2
+} kc_protector_mode_t;
+
+typedef enum kc_battery_visual {
+    KC_VIS_NORMAL = 0,
+    KC_VIS_LOW = 1,
+    KC_VIS_CHARGING = 2,
+    KC_VIS_STALE = 3,
+    KC_VIS_CHARGE_SOON = 4,
+    KC_VIS_CHARGE_LIMIT = 5
+} kc_battery_visual_t;
+
+typedef struct kc_protector_persist {
+    uint8_t mode;
+    bool laptop_guard;
+    bool calibrating;
+    uint32_t cum_charged_pct;
+    uint64_t last_cal_unix;
+    uint64_t cal_snooze_until;
+} kc_protector_persist_t;
+
+typedef struct kc_protector_runtime {
+    bool has_prev_pct;
+    uint8_t prev_pct;
+    bool charge_soon_notified;
+    bool charge_limit_notified;
+    bool laptop_guard_notified;
+    bool cal_due_notified;
+    bool pending_cal_complete;
+} kc_protector_runtime_t;
+
+/** Initialize persisted Battery Protector configuration to recommended Longevity defaults. */
+void kc_protector_persist_init(kc_protector_persist_t *p, uint64_t now_unix);
+
+/** Clamp raw numeric mode value into a valid kc_protector_mode_t value. */
+uint8_t kc_clamp_protector_mode(uint32_t raw_mode);
+
+/** Return active [min_pct, max_pct] bounds for the given protector mode (0..100 when Off). */
+void kc_protector_bounds(uint8_t mode, uint8_t *out_min_pct, uint8_t *out_max_pct);
+
+/** Initialize runtime Battery Protector session alert flags. */
+void kc_protector_runtime_init(kc_protector_runtime_t *rt);
+
+/** Reset per-device session flags (preserving persistent calibration & cycle counters). */
+void kc_protector_runtime_reset_session(kc_protector_runtime_t *rt);
+
+/**
+ * Record a valid battery poll sample for cycle accumulation & automatic 100% calibration
+ * completion. Sets *out_dirty if persisted state changed, and *out_cal_completed once when
+ * an active calibration reaches 100% while charging.
+ */
+bool kc_protector_record_sample(kc_protector_persist_t *p,
+                                kc_protector_runtime_t *rt,
+                                uint8_t pct,
+                                bool charging,
+                                uint64_t now_unix,
+                                bool *out_cal_completed);
+
+/**
+ * Compute days elapsed and full-equivalent cycles (tenths, e.g. 250 = 25.0) since last
+ * calibration, returning true when calibration is currently recommended (due & not snoozed).
+ */
+bool kc_protector_is_cal_due(const kc_protector_persist_t *p,
+                             uint64_t now_unix,
+                             uint32_t *out_days,
+                             uint32_t *out_cycles_x10);
+
+/** Enable or cancel a 100% calibration run until the next full charge. */
+bool kc_protector_set_calibrating(kc_protector_persist_t *p,
+                                  kc_protector_runtime_t *rt,
+                                  bool enable);
+
+/** Snooze the calibration reminder for KC_CAL_SNOOZE_DAYS from now_unix. */
+void kc_protector_snooze_calibration(kc_protector_persist_t *p,
+                                     kc_protector_runtime_t *rt,
+                                     uint64_t now_unix);
+
+/** Reset cycle counters and mark battery calibrated as of now_unix. */
+void kc_protector_reset_calibration(kc_protector_persist_t *p,
+                                    kc_protector_runtime_t *rt,
+                                    uint64_t now_unix);
+
+/** Compute prioritized tray visual state (Red Low < Yellow Charge Soon < Green Charging < Cyan Limit). */
+kc_battery_visual_t kc_compute_battery_visual(const kc_poll_state_t *poll,
+                                              const kc_protector_persist_t *p,
+                                              uint8_t low_alert_pct);
+
+/** Return true once when discharging enters recommended plug-in floor (above urgent low_alert_pct). */
+bool kc_check_charge_soon_alert(const kc_poll_state_t *poll,
+                                const kc_protector_persist_t *p,
+                                kc_protector_runtime_t *rt,
+                                uint8_t low_alert_pct);
+
+/** Return true once when charging reaches recommended ceiling max_pct (disabled while calibrating). */
+bool kc_check_charge_limit_alert(const kc_poll_state_t *poll,
+                                 const kc_protector_persist_t *p,
+                                 kc_protector_runtime_t *rt);
+
+/**
+ * Return true once when charging from an unplugged laptop battery that dropped <= KC_LAPTOP_GUARD_PCT
+ * while mouse already has >= KC_LAPTOP_GUARD_MOUSE_MIN (skipped while calibrating).
+ */
+bool kc_check_laptop_guard_alert(const kc_poll_state_t *poll,
+                                 const kc_protector_persist_t *p,
+                                 kc_protector_runtime_t *rt,
+                                 bool has_sys_battery,
+                                 bool on_laptop_battery,
+                                 uint8_t laptop_pct);
+
+/** Return true once when calibration is recommended and hasn't been notified this session. */
+bool kc_check_cal_due_alert(const kc_poll_state_t *poll,
+                            const kc_protector_persist_t *p,
+                            kc_protector_runtime_t *rt,
+                            uint64_t now_unix);
+
 #endif /* KEYCHRON_PROTOCOL_H */

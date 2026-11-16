@@ -352,10 +352,135 @@ static void test_charging_cadence_full_alert_and_drain(void) {
     KC_CHECK(rate_x10 == 20U && hours_x10 == 435U);
 }
 
+static void test_battery_protector_and_calibration(void) {
+    uint64_t t0 = 1700000000ULL;
+    kc_protector_persist_t p;
+    kc_protector_runtime_t rt;
+    kc_protector_persist_init(&p, t0);
+    kc_protector_runtime_init(&rt);
+
+    KC_CHECK(p.mode == KC_PROT_LONGEVITY && p.laptop_guard && !p.calibrating);
+    KC_CHECK(kc_clamp_protector_mode(0U) == KC_PROT_OFF);
+    KC_CHECK(kc_clamp_protector_mode(2U) == KC_PROT_BALANCED);
+    KC_CHECK(kc_clamp_protector_mode(99U) == KC_PROT_LONGEVITY);
+
+    uint8_t min_p = 0U, max_p = 0U;
+    kc_protector_bounds(KC_PROT_LONGEVITY, &min_p, &max_p);
+    KC_CHECK(min_p == 25U && max_p == 80U);
+    kc_protector_bounds(KC_PROT_BALANCED, &min_p, &max_p);
+    KC_CHECK(min_p == 20U && max_p == 90U);
+    kc_protector_bounds(KC_PROT_OFF, &min_p, &max_p);
+    KC_CHECK(min_p == 0U && max_p == 100U);
+
+    /* Visual priority: Normal > Yellow (<=25%) > Red (<=15%), Green charging < 80%, Cyan >= 80%, Gray stale. */
+    kc_poll_state_t st;
+    kc_poll_state_init(&st);
+    kc_poll_state_record_success(&st, 50U, false, 1000ULL);
+    KC_CHECK(kc_compute_battery_visual(&st, &p, 15U) == KC_VIS_NORMAL);
+
+    kc_poll_state_record_success(&st, 25U, false, 2000ULL);
+    KC_CHECK(kc_compute_battery_visual(&st, &p, 15U) == KC_VIS_CHARGE_SOON);
+    KC_CHECK(kc_check_charge_soon_alert(&st, &p, &rt, 15U));
+    KC_CHECK(!kc_check_charge_soon_alert(&st, &p, &rt, 15U));
+
+    /* At <=15%, critical Red overrides Yellow and suppresses duplicate Charge Soon alert. */
+    kc_poll_state_record_success(&st, 15U, false, 3000ULL);
+    KC_CHECK(kc_compute_battery_visual(&st, &p, 15U) == KC_VIS_LOW);
+    rt.charge_soon_notified = false;
+    KC_CHECK(!kc_check_charge_soon_alert(&st, &p, &rt, 15U));
+
+    /* Discharging below hysteresis band stays armed; >=30% re-arms Charge Soon. */
+    kc_poll_state_record_success(&st, 28U, false, 4000ULL);
+    kc_check_charge_soon_alert(&st, &p, &rt, 15U);
+    kc_poll_state_record_success(&st, 25U, false, 5000ULL);
+    KC_CHECK(!rt.charge_soon_notified || kc_check_charge_soon_alert(&st, &p, &rt, 15U) == false);
+    rt.charge_soon_notified = true;
+    kc_poll_state_record_success(&st, 29U, false, 6000ULL);
+    kc_check_charge_soon_alert(&st, &p, &rt, 15U);
+    KC_CHECK(rt.charge_soon_notified);
+    kc_poll_state_record_success(&st, 30U, false, 7000ULL);
+    kc_check_charge_soon_alert(&st, &p, &rt, 15U);
+    KC_CHECK(!rt.charge_soon_notified);
+
+    /* Charge ceiling visual & 5% hysteresis, plus trickle 1% wobble immunity. */
+    bool cal_done = false;
+    KC_CHECK(!kc_protector_record_sample(&p, &rt, 50U, true, t0 + 10ULL, &cal_done));
+    KC_CHECK(kc_protector_record_sample(&p, &rt, 79U, true, t0 + 20ULL, &cal_done));
+    KC_CHECK(p.cum_charged_pct == 29U && !cal_done);
+    /* 1% drop while charging then back to 79% must NOT add phantom cycle%. */
+    KC_CHECK(!kc_protector_record_sample(&p, &rt, 78U, true, t0 + 30ULL, &cal_done));
+    KC_CHECK(!kc_protector_record_sample(&p, &rt, 79U, true, t0 + 40ULL, &cal_done));
+    KC_CHECK(p.cum_charged_pct == 29U);
+
+    KC_CHECK(kc_protector_record_sample(&p, &rt, 80U, true, t0 + 50ULL, &cal_done));
+    KC_CHECK(p.cum_charged_pct == 30U);
+    kc_poll_state_record_success(&st, 79U, true, 8000ULL);
+    KC_CHECK(kc_compute_battery_visual(&st, &p, 15U) == KC_VIS_CHARGING);
+    kc_poll_state_record_success(&st, 80U, true, 9000ULL);
+    KC_CHECK(kc_compute_battery_visual(&st, &p, 15U) == KC_VIS_CHARGE_LIMIT);
+    KC_CHECK(kc_check_charge_limit_alert(&st, &p, &rt));
+    KC_CHECK(!kc_check_charge_limit_alert(&st, &p, &rt));
+
+    /* Laptop battery guard triggers once when laptop <=25% on battery and mouse >=50%. */
+    KC_CHECK(!kc_check_laptop_guard_alert(&st, &p, &rt, true, false, 20U));
+    KC_CHECK(kc_check_laptop_guard_alert(&st, &p, &rt, true, true, 25U));
+    KC_CHECK(!kc_check_laptop_guard_alert(&st, &p, &rt, true, true, 22U));
+
+    /* Failures mark visual Stale regardless of battery percentage. */
+    kc_poll_state_record_failure(&st);
+    KC_CHECK(kc_compute_battery_visual(&st, &p, 15U) == KC_VIS_STALE);
+
+    /* Calibration due at >=1000% (10 cycles) OR 90 days (>=1 cycle) OR 180d idle; snooze defers 14d. */
+    uint32_t days = 0U, cyc_x10 = 0U;
+    KC_CHECK(p.cum_charged_pct == 30U);
+    KC_CHECK(!kc_protector_is_cal_due(&p, t0 + 89ULL * 86400ULL, &days, &cyc_x10));
+    KC_CHECK(days == 89U && cyc_x10 == 3U);
+    /* Day 90 with only 30% (<1 cycle) waits until >=100% charged or 180-day fallback. */
+    KC_CHECK(!kc_protector_is_cal_due(&p, t0 + 90ULL * 86400ULL, &days, &cyc_x10));
+    KC_CHECK(kc_protector_is_cal_due(&p, t0 + 180ULL * 86400ULL, &days, &cyc_x10));
+    KC_CHECK(days == 180U);
+
+    /* Reaching 100% (1.0 cycle) makes Day 90 trigger cleanly, then snooze defers 14 days. */
+    KC_CHECK(!kc_protector_record_sample(&p, &rt, 20U, false, t0 + 55ULL, &cal_done));
+    KC_CHECK(kc_protector_record_sample(&p, &rt, 90U, true, t0 + 60ULL, &cal_done));
+    KC_CHECK(p.cum_charged_pct == 100U);
+    KC_CHECK(!kc_protector_is_cal_due(&p, t0 + 89ULL * 86400ULL, &days, &cyc_x10));
+    KC_CHECK(kc_protector_is_cal_due(&p, t0 + 90ULL * 86400ULL, &days, &cyc_x10));
+
+    kc_protector_snooze_calibration(&p, &rt, t0 + 90ULL * 86400ULL);
+    KC_CHECK(!kc_protector_is_cal_due(&p, t0 + 103ULL * 86400ULL, &days, &cyc_x10));
+    KC_CHECK(kc_protector_is_cal_due(&p, t0 + 104ULL * 86400ULL, &days, &cyc_x10));
+
+    /* Heavy usage (e.g. 8K polling hitting 1000% = 10.0 cycles early on Day 5) triggers due. */
+    p.cal_snooze_until = 0ULL;
+    p.cum_charged_pct = 1000U;
+    KC_CHECK(kc_protector_is_cal_due(&p, t0 + 5ULL * 86400ULL, &days, &cyc_x10));
+    KC_CHECK(cyc_x10 == 100U);
+
+    /* Enable calibration: lifts 80% cap -> Green while charging >80%, auto-completes at 100%. */
+    KC_CHECK(kc_protector_set_calibrating(&p, &rt, true));
+    kc_poll_state_record_success(&st, 85U, true, 10000ULL);
+    KC_CHECK(kc_compute_battery_visual(&st, &p, 15U) == KC_VIS_CHARGING);
+    KC_CHECK(!kc_check_charge_limit_alert(&st, &p, &rt));
+
+    uint64_t t_cal = t0 + 104ULL * 86400ULL + 100ULL;
+    KC_CHECK(kc_protector_record_sample(&p, &rt, 100U, true, t_cal, &cal_done));
+    KC_CHECK(cal_done);
+    KC_CHECK(!p.calibrating && p.cum_charged_pct == 0U && p.last_cal_unix == t_cal);
+    KC_CHECK(rt.pending_cal_complete && rt.charge_limit_notified);
+    kc_poll_state_record_success(&st, 100U, true, 11000ULL);
+    KC_CHECK(kc_compute_battery_visual(&st, &p, 15U) == KC_VIS_CHARGE_LIMIT);
+
+    /* Clock rewind safety: now_unix < last_cal_unix never underflows. */
+    KC_CHECK(!kc_protector_is_cal_due(&p, t0, &days, &cyc_x10));
+    KC_CHECK(days == 0U && cyc_x10 == 0U);
+}
+
 int main(void) {
     test_build_and_parse_report();
     test_recv_state_and_model_lookup();
     test_charging_cadence_full_alert_and_drain();
+    test_battery_protector_and_calibration();
     test_path_helpers();
     test_score_candidate_ranking();
     test_backoff_and_clamps();

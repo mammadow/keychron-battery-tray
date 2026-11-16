@@ -575,3 +575,323 @@ size_t kc_json_escape(const char *src, char *dst, size_t dst_cap) {
     }
     return out_idx;
 }
+
+void kc_protector_persist_init(kc_protector_persist_t *p, uint64_t now_unix) {
+    if (!p) {
+        return;
+    }
+    memset(p, 0, sizeof(*p));
+    p->mode = (uint8_t)KC_PROT_LONGEVITY;
+    p->laptop_guard = true;
+    p->last_cal_unix = now_unix;
+}
+
+uint8_t kc_clamp_protector_mode(uint32_t raw_mode) {
+    switch (raw_mode) {
+        case KC_PROT_OFF:       return (uint8_t)KC_PROT_OFF;
+        case KC_PROT_BALANCED:  return (uint8_t)KC_PROT_BALANCED;
+        default:                return (uint8_t)KC_PROT_LONGEVITY;
+    }
+}
+
+void kc_protector_bounds(uint8_t mode, uint8_t *out_min_pct, uint8_t *out_max_pct) {
+    uint8_t min_p = 0U;
+    uint8_t max_p = 100U;
+    if (mode == (uint8_t)KC_PROT_LONGEVITY) {
+        min_p = (uint8_t)KC_PROT_LONGEVITY_MIN_PCT;
+        max_p = (uint8_t)KC_PROT_LONGEVITY_MAX_PCT;
+    } else if (mode == (uint8_t)KC_PROT_BALANCED) {
+        min_p = (uint8_t)KC_PROT_BALANCED_MIN_PCT;
+        max_p = (uint8_t)KC_PROT_BALANCED_MAX_PCT;
+    }
+    if (out_min_pct) *out_min_pct = min_p;
+    if (out_max_pct) *out_max_pct = max_p;
+}
+
+void kc_protector_runtime_init(kc_protector_runtime_t *rt) {
+    if (!rt) {
+        return;
+    }
+    memset(rt, 0, sizeof(*rt));
+}
+
+void kc_protector_runtime_reset_session(kc_protector_runtime_t *rt) {
+    if (!rt) {
+        return;
+    }
+    rt->has_prev_pct = false;
+    rt->prev_pct = 0U;
+    rt->charge_soon_notified = false;
+    rt->charge_limit_notified = false;
+    rt->laptop_guard_notified = false;
+    rt->pending_cal_complete = false;
+}
+
+bool kc_protector_record_sample(kc_protector_persist_t *p,
+                                kc_protector_runtime_t *rt,
+                                uint8_t pct,
+                                bool charging,
+                                uint64_t now_unix,
+                                bool *out_cal_completed) {
+    if (out_cal_completed) {
+        *out_cal_completed = false;
+    }
+    if (!p || !rt || pct > 100U) {
+        return false;
+    }
+
+    bool dirty = false;
+    if (now_unix > 0ULL && p->last_cal_unix == 0ULL) {
+        p->last_cal_unix = now_unix;
+        dirty = true;
+    }
+
+    if (!rt->has_prev_pct) {
+        rt->has_prev_pct = true;
+        rt->prev_pct = pct;
+    } else if (charging) {
+        if (pct > rt->prev_pct) {
+            uint32_t delta = (uint32_t)(pct - rt->prev_pct);
+            uint32_t cap = UINT32_MAX - delta;
+            p->cum_charged_pct = (p->cum_charged_pct <= cap)
+                ? (p->cum_charged_pct + delta)
+                : UINT32_MAX;
+            rt->prev_pct = pct;
+            dirty = true;
+        } else if ((uint32_t)(rt->prev_pct - pct) >= 2U) {
+            /* Require >= 2% drop while plugged in so 1% trickle wobble never inflates cycles. */
+            rt->prev_pct = pct;
+        }
+    } else {
+        rt->prev_pct = pct;
+    }
+
+    if (p->calibrating && charging && pct == 100U) {
+        p->calibrating = false;
+        p->cum_charged_pct = 0U;
+        if (now_unix > 0ULL) {
+            p->last_cal_unix = now_unix;
+        }
+        p->cal_snooze_until = 0ULL;
+        rt->cal_due_notified = false;
+        rt->charge_limit_notified = true;
+        rt->pending_cal_complete = true;
+        if (out_cal_completed) {
+            *out_cal_completed = true;
+        }
+        dirty = true;
+    }
+
+    return dirty;
+}
+
+bool kc_protector_is_cal_due(const kc_protector_persist_t *p,
+                             uint64_t now_unix,
+                             uint32_t *out_days,
+                             uint32_t *out_cycles_x10) {
+    if (!p) {
+        if (out_days) *out_days = 0U;
+        if (out_cycles_x10) *out_cycles_x10 = 0U;
+        return false;
+    }
+
+    uint64_t elapsed_sec = (now_unix > p->last_cal_unix && p->last_cal_unix > 0ULL)
+        ? (now_unix - p->last_cal_unix)
+        : 0ULL;
+    uint64_t days64 = elapsed_sec / 86400ULL;
+    uint32_t days = (days64 > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)days64;
+    uint32_t cycles_x10 = (p->cum_charged_pct <= UINT32_MAX - 5U)
+        ? ((p->cum_charged_pct + 5U) / 10U)
+        : (p->cum_charged_pct / 10U);
+
+    if (out_days) *out_days = days;
+    if (out_cycles_x10) *out_cycles_x10 = cycles_x10;
+
+    if (p->mode == (uint8_t)KC_PROT_OFF || p->calibrating) {
+        return false;
+    }
+    if (p->cal_snooze_until > 0ULL && now_unix < p->cal_snooze_until) {
+        return false;
+    }
+    bool cycle_due = (p->cum_charged_pct >= KC_CAL_CYCLE_TARGET_PCT);
+    bool days_due = (days >= KC_CAL_INTERVAL_DAYS &&
+                     p->cum_charged_pct >= KC_CAL_MIN_DAYS_CYCLES_PCT) ||
+                    (days >= KC_CAL_MAX_IDLE_DAYS);
+    return cycle_due || days_due;
+}
+
+bool kc_protector_set_calibrating(kc_protector_persist_t *p,
+                                  kc_protector_runtime_t *rt,
+                                  bool enable) {
+    if (!p) {
+        return false;
+    }
+    if (enable && p->mode == (uint8_t)KC_PROT_OFF) {
+        return false;
+    }
+    bool changed = (p->calibrating != enable);
+    p->calibrating = enable;
+    if (rt) {
+        rt->pending_cal_complete = false;
+        rt->charge_limit_notified = false;
+        if (enable) {
+            rt->cal_due_notified = true;
+        }
+    }
+    return changed;
+}
+
+void kc_protector_snooze_calibration(kc_protector_persist_t *p,
+                                     kc_protector_runtime_t *rt,
+                                     uint64_t now_unix) {
+    if (!p) {
+        return;
+    }
+    p->cal_snooze_until = now_unix + (uint64_t)KC_CAL_SNOOZE_DAYS * 86400ULL;
+    if (rt) {
+        rt->cal_due_notified = false;
+    }
+}
+
+void kc_protector_reset_calibration(kc_protector_persist_t *p,
+                                    kc_protector_runtime_t *rt,
+                                    uint64_t now_unix) {
+    if (!p) {
+        return;
+    }
+    p->calibrating = false;
+    p->cum_charged_pct = 0U;
+    p->last_cal_unix = now_unix;
+    p->cal_snooze_until = 0ULL;
+    if (rt) {
+        rt->cal_due_notified = false;
+        rt->pending_cal_complete = false;
+        rt->charge_limit_notified = false;
+    }
+}
+
+kc_battery_visual_t kc_compute_battery_visual(const kc_poll_state_t *poll,
+                                              const kc_protector_persist_t *p,
+                                              uint8_t low_alert_pct) {
+    if (!poll || !poll->has_reading) {
+        return KC_VIS_NORMAL;
+    }
+    if (poll->consecutive_failures > 0U) {
+        return KC_VIS_STALE;
+    }
+
+    uint8_t min_p = 0U;
+    uint8_t max_p = 100U;
+    if (p) {
+        kc_protector_bounds(p->mode, &min_p, &max_p);
+    }
+
+    if (poll->last_charging) {
+        if (p && p->mode != (uint8_t)KC_PROT_OFF && !p->calibrating &&
+            poll->last_pct >= max_p) {
+            return KC_VIS_CHARGE_LIMIT;
+        }
+        return KC_VIS_CHARGING;
+    }
+
+    if (low_alert_pct > 0U && poll->last_pct <= low_alert_pct) {
+        return KC_VIS_LOW;
+    }
+    if (p && p->mode != (uint8_t)KC_PROT_OFF && min_p > 0U && poll->last_pct <= min_p) {
+        return KC_VIS_CHARGE_SOON;
+    }
+    return KC_VIS_NORMAL;
+}
+
+bool kc_check_charge_soon_alert(const kc_poll_state_t *poll,
+                                const kc_protector_persist_t *p,
+                                kc_protector_runtime_t *rt,
+                                uint8_t low_alert_pct) {
+    if (!poll || !p || !rt || p->mode == (uint8_t)KC_PROT_OFF ||
+        !poll->has_reading || poll->last_charging || poll->consecutive_failures > 0U) {
+        return false;
+    }
+    uint8_t min_p = 0U;
+    kc_protector_bounds(p->mode, &min_p, NULL);
+    if (min_p == 0U) {
+        return false;
+    }
+    if (poll->last_pct <= min_p) {
+        /* Urgent critical low alert takes precedence at <= low_alert_pct. */
+        if (low_alert_pct > 0U && poll->last_pct <= low_alert_pct) {
+            return false;
+        }
+        if (!rt->charge_soon_notified) {
+            rt->charge_soon_notified = true;
+            return true;
+        }
+        return false;
+    }
+    if (poll->last_pct >= (uint8_t)(min_p + KC_PROT_HYST_PCT)) {
+        rt->charge_soon_notified = false;
+    }
+    return false;
+}
+
+bool kc_check_charge_limit_alert(const kc_poll_state_t *poll,
+                                 const kc_protector_persist_t *p,
+                                 kc_protector_runtime_t *rt) {
+    if (!poll || !p || !rt || p->mode == (uint8_t)KC_PROT_OFF || p->calibrating ||
+        !poll->has_reading || poll->consecutive_failures > 0U) {
+        return false;
+    }
+    uint8_t max_p = 100U;
+    kc_protector_bounds(p->mode, NULL, &max_p);
+    if (poll->last_pct <= (uint8_t)(max_p - KC_PROT_HYST_PCT)) {
+        rt->charge_limit_notified = false;
+        return false;
+    }
+    if (poll->last_charging && poll->last_pct >= max_p && !rt->charge_limit_notified) {
+        rt->charge_limit_notified = true;
+        return true;
+    }
+    return false;
+}
+
+bool kc_check_laptop_guard_alert(const kc_poll_state_t *poll,
+                                 const kc_protector_persist_t *p,
+                                 kc_protector_runtime_t *rt,
+                                 bool has_sys_battery,
+                                 bool on_laptop_battery,
+                                 uint8_t laptop_pct) {
+    if (!poll || !p || !rt || p->mode == (uint8_t)KC_PROT_OFF ||
+        !p->laptop_guard || p->calibrating || !has_sys_battery ||
+        !poll->has_reading || poll->consecutive_failures > 0U) {
+        return false;
+    }
+    if (!on_laptop_battery || !poll->last_charging) {
+        if (!on_laptop_battery || laptop_pct >= (uint8_t)(KC_LAPTOP_GUARD_PCT + KC_PROT_HYST_PCT)) {
+            rt->laptop_guard_notified = false;
+        }
+        return false;
+    }
+    if (laptop_pct <= KC_LAPTOP_GUARD_PCT && poll->last_pct >= KC_LAPTOP_GUARD_MOUSE_MIN) {
+        if (!rt->laptop_guard_notified) {
+            rt->laptop_guard_notified = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool kc_check_cal_due_alert(const kc_poll_state_t *poll,
+                            const kc_protector_persist_t *p,
+                            kc_protector_runtime_t *rt,
+                            uint64_t now_unix) {
+    if (!poll || !p || !rt || !poll->has_reading || poll->consecutive_failures > 0U) {
+        return false;
+    }
+    if (!kc_protector_is_cal_due(p, now_unix, NULL, NULL)) {
+        return false;
+    }
+    if (!rt->cal_due_notified) {
+        rt->cal_due_notified = true;
+        return true;
+    }
+    return false;
+}

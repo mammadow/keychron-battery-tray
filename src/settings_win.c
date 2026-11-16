@@ -9,11 +9,26 @@
 #define KC_RUN_SUBKEY      L"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
 #define KC_RUN_VALUE       L"KeychronBatteryTray"
 
-static bool kc_reg_read_dword(const wchar_t *name, DWORD *out) {
+static bool kc_reg_read_dword_at(const wchar_t *subkey, const wchar_t *name, DWORD *out) {
     DWORD val = 0;
     DWORD sz = sizeof(val);
-    if (RegGetValueW(HKEY_CURRENT_USER, KC_SETTINGS_SUBKEY, name,
+    if (RegGetValueW(HKEY_CURRENT_USER, subkey, name,
                      RRF_RT_REG_DWORD, NULL, &val, &sz) == ERROR_SUCCESS) {
+        *out = val;
+        return true;
+    }
+    return false;
+}
+
+static bool kc_reg_read_dword(const wchar_t *name, DWORD *out) {
+    return kc_reg_read_dword_at(KC_SETTINGS_SUBKEY, name, out);
+}
+
+static bool kc_reg_read_qword_at(const wchar_t *subkey, const wchar_t *name, uint64_t *out) {
+    uint64_t val = 0ULL;
+    DWORD sz = sizeof(val);
+    if (RegGetValueW(HKEY_CURRENT_USER, subkey, name,
+                     RRF_RT_REG_QWORD, NULL, &val, &sz) == ERROR_SUCCESS) {
         *out = val;
         return true;
     }
@@ -122,4 +137,65 @@ void kc_autostart_set(bool enable, uint16_t vid, uint16_t pid, int interface_num
         RegSetValueExW(key, KC_RUN_VALUE, 0, REG_SZ, (const BYTE *)cmd, bytes);
     }
     RegCloseKey(key);
+}
+
+void kc_protector_load_at(const wchar_t *subkey, kc_protector_persist_t *out, uint64_t now_unix) {
+    if (!subkey || !out) {
+        return;
+    }
+    kc_protector_persist_init(out, now_unix);
+
+    DWORD val = 0;
+    if (kc_reg_read_dword_at(subkey, L"ProtectorMode", &val)) {
+        out->mode = kc_clamp_protector_mode(val);
+    }
+    if (kc_reg_read_dword_at(subkey, L"ProtectorLaptopGuard", &val)) {
+        out->laptop_guard = (val != 0UL);
+    }
+    if (kc_reg_read_dword_at(subkey, L"ProtectorCalibrating", &val)) {
+        out->calibrating = (val != 0UL) && (out->mode != (uint8_t)KC_PROT_OFF);
+    }
+    if (kc_reg_read_dword_at(subkey, L"ProtectorCumChargedPct", &val)) {
+        out->cum_charged_pct = (uint32_t)val;
+    }
+    uint64_t qv = 0ULL;
+    if (kc_reg_read_qword_at(subkey, L"ProtectorLastCalUnix", &qv)) {
+        out->last_cal_unix = qv;
+    }
+    if (kc_reg_read_qword_at(subkey, L"ProtectorSnoozeUntil", &qv)) {
+        out->cal_snooze_until = qv;
+    }
+}
+
+void kc_protector_save_at(const wchar_t *subkey, const kc_protector_persist_t *p) {
+    if (!subkey || !p) {
+        return;
+    }
+    HKEY key = NULL;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, subkey, 0, NULL, 0,
+                        KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS) {
+        return;
+    }
+    DWORD mode = kc_clamp_protector_mode(p->mode);
+    DWORD lguard = p->laptop_guard ? 1UL : 0UL;
+    DWORD cal = (p->calibrating && mode != (uint32_t)KC_PROT_OFF) ? 1UL : 0UL;
+    DWORD cum = (DWORD)p->cum_charged_pct;
+    uint64_t last_cal = p->last_cal_unix;
+    uint64_t snooze = p->cal_snooze_until;
+
+    RegSetValueExW(key, L"ProtectorMode", 0, REG_DWORD, (const BYTE *)&mode, sizeof(mode));
+    RegSetValueExW(key, L"ProtectorLaptopGuard", 0, REG_DWORD, (const BYTE *)&lguard, sizeof(lguard));
+    RegSetValueExW(key, L"ProtectorCalibrating", 0, REG_DWORD, (const BYTE *)&cal, sizeof(cal));
+    RegSetValueExW(key, L"ProtectorCumChargedPct", 0, REG_DWORD, (const BYTE *)&cum, sizeof(cum));
+    RegSetValueExW(key, L"ProtectorLastCalUnix", 0, REG_QWORD, (const BYTE *)&last_cal, sizeof(last_cal));
+    RegSetValueExW(key, L"ProtectorSnoozeUntil", 0, REG_QWORD, (const BYTE *)&snooze, sizeof(snooze));
+    RegCloseKey(key);
+}
+
+void kc_protector_load(kc_protector_persist_t *out, uint64_t now_unix) {
+    kc_protector_load_at(KC_SETTINGS_SUBKEY, out, now_unix);
+}
+
+void kc_protector_save(const kc_protector_persist_t *p) {
+    kc_protector_save_at(KC_SETTINGS_SUBKEY, p);
 }
