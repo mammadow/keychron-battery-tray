@@ -219,7 +219,7 @@ static bool kc_http_fetch(const wchar_t *url,
         return false;
     }
 
-    wh->set_timeouts(h_sess, 15000, 15000, 15000, 30000);
+    wh->set_timeouts(h_sess, 10000, 8000, 10000, 20000);
 
     HINTERNET h_conn = wh->connect(h_sess, host, uc.nPort, 0U);
     if (!h_conn) {
@@ -409,7 +409,28 @@ kc_update_check_result_t kc_updater_check_latest(const char *current_ver_str, HA
     sink.file = INVALID_HANDLE_VALUE;
     sink.max_bytes = KC_UPD_MAX_MANIFEST_BYTES;
 
-    if (!kc_http_fetch(KC_UPDATE_MANIFEST_URL, &sink, stop_event, res.error)) {
+    bool ok_fetch = false;
+    for (uint32_t attempt = 0U; attempt < 3U; ++attempt) {
+        sink.mem_len = 0U;
+        json[0] = '\0';
+        res.error[0] = L'\0';
+        if (kc_http_fetch(KC_UPDATE_MANIFEST_URL, &sink, stop_event, res.error)) {
+            ok_fetch = true;
+            break;
+        }
+        if (kc_upd_cancelled(stop_event) || attempt + 1U >= 3U) {
+            break;
+        }
+        if (stop_event) {
+            if (WaitForSingleObject(stop_event, 400U) == WAIT_OBJECT_0) {
+                kc_upd_set_err(res.error, L"Cancelled.");
+                break;
+            }
+        } else {
+            Sleep(400U);
+        }
+    }
+    if (!ok_fetch) {
         free(json);
         return res;
     }
@@ -612,32 +633,54 @@ kc_update_install_result_t kc_updater_prepare_install(const kc_release_info_t *r
     }
 
     BCRYPT_ALG_HANDLE alg = NULL;
-    BCRYPT_HASH_HANDLE hash_h = NULL;
     if (!BCRYPT_SUCCESS(bc->open_algorithm_provider(&alg, BCRYPT_SHA256_ALGORITHM, NULL, 0U))) {
         CloseHandle(zf);
         kc_updater_cleanup_dir(res.work_dir);
         kc_upd_set_err(res.error, L"Failed to initialize SHA-256.");
         return res;
     }
-    if (!BCRYPT_SUCCESS(bc->create_hash(alg, &hash_h, NULL, 0U, NULL, 0U, 0U))) {
-        bc->close_algorithm_provider(alg, 0U);
-        CloseHandle(zf);
-        kc_updater_cleanup_dir(res.work_dir);
-        kc_upd_set_err(res.error, L"Failed to allocate SHA-256 hash.");
-        return res;
-    }
 
-    kc_http_sink_t sink;
-    memset(&sink, 0, sizeof(sink));
-    sink.file = zf;
-    sink.bc = bc;
-    sink.hash_h = hash_h;
-    sink.max_bytes = KC_UPD_MAX_ZIP_BYTES;
-
-    bool fetched = kc_http_fetch(url_w, &sink, stop_event, res.error);
+    bool fetched = false;
+    bool hashed = false;
     uint8_t digest[32];
-    bool hashed = fetched && BCRYPT_SUCCESS(bc->finish_hash(hash_h, digest, (ULONG)sizeof(digest), 0U));
-    bc->destroy_hash(hash_h);
+    memset(digest, 0, sizeof(digest));
+
+    for (uint32_t attempt = 0U; attempt < 3U; ++attempt) {
+        BCRYPT_HASH_HANDLE hash_h = NULL;
+        if (!BCRYPT_SUCCESS(bc->create_hash(alg, &hash_h, NULL, 0U, NULL, 0U, 0U))) {
+            kc_upd_set_err(res.error, L"Failed to allocate SHA-256 hash.");
+            break;
+        }
+        SetFilePointer(zf, 0, NULL, FILE_BEGIN);
+        SetEndOfFile(zf);
+
+        kc_http_sink_t sink;
+        memset(&sink, 0, sizeof(sink));
+        sink.file = zf;
+        sink.bc = bc;
+        sink.hash_h = hash_h;
+        sink.max_bytes = KC_UPD_MAX_ZIP_BYTES;
+
+        res.error[0] = L'\0';
+        fetched = kc_http_fetch(url_w, &sink, stop_event, res.error);
+        if (fetched) {
+            hashed = BCRYPT_SUCCESS(bc->finish_hash(hash_h, digest, (ULONG)sizeof(digest), 0U));
+            bc->destroy_hash(hash_h);
+            break;
+        }
+        bc->destroy_hash(hash_h);
+        if (kc_upd_cancelled(stop_event) || attempt + 1U >= 3U) {
+            break;
+        }
+        if (stop_event) {
+            if (WaitForSingleObject(stop_event, 400U) == WAIT_OBJECT_0) {
+                kc_upd_set_err(res.error, L"Cancelled.");
+                break;
+            }
+        } else {
+            Sleep(400U);
+        }
+    }
     bc->close_algorithm_provider(alg, 0U);
     CloseHandle(zf);
 
